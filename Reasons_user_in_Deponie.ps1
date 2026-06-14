@@ -22,7 +22,7 @@ if ($allDeactivatedUsers.Count -gt 0) {
     Write-Host "Output saved to: $outputFilePath"}
 
 # Write SamAccountNames to the file
-$allDeactivatedUsers | ForEach-Object { $_.SamAccountName | Out-File -Append -FilePath $outputFilePathSAM }
+$allDeactivatedUsers | ForEach-Object { $_.SamAccountName } | Out-File -Append -FilePath $outputFilePathSAM
 # Display message about the file
 Write-Host "SamAccountNames have been written to: $outputFilePathSAM"
 

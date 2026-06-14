@@ -46,7 +46,7 @@ if ($allUsers.Count -gt 0) {
     $allUsers | Select-Object Name, SamAccountName, DistinguishedName | Format-Table -AutoSize
 
     # Write all SAMAccountNames in the given scope into a file
-    $allUsers | ForEach-Object { $_.SamAccountName | Out-File -Append -FilePath $samAccountNamesFilePath }
+    $allUsers | ForEach-Object { $_.SamAccountName } | Out-File -Append -FilePath $samAccountNamesFilePath
 
     # Get all users and their last logon date
     $usersLastLogon = $allUsers | Get-ADUser -Properties LastLogonDate | Select-Object Name, SamAccountName, LastLogonDate
