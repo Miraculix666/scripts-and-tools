@@ -1280,10 +1280,19 @@ process {
              # 4. Daten für den Export aufbereiten
              $exportData = [System.Collections.Generic.List[PSObject]]::new()
              Write-Log -Level Info -Message "Bereite Daten für den Export vor..."
-             foreach ($userDN in ($uniqueFoundUsers | Select-Object -ExpandProperty DistinguishedName)) { # Iteriere über DNs
+
+             # Perform bulk query via pipeline safely
+             $userDNs = $uniqueFoundUsers | Select-Object -ExpandProperty DistinguishedName
+             $fullUsers = $userDNs | Get-ADUser -Properties $allPropertiesToGet -ErrorAction SilentlyContinue -ErrorVariable adErrors
+
+             if ($adErrors) {
+                 foreach ($err in $adErrors) {
+                     Write-Log -Level Warning -Message "Fehler beim Bulk-Abruf eines Benutzers: $($err.Exception.Message)"
+                 }
+             }
+
+             foreach ($user in $fullUsers) {
                  try {
-                     # Hole das vollständige Benutzerobjekt erneut
-                     $user = Get-ADUser -Identity $userDN -Properties $allPropertiesToGet -ErrorAction Stop
                      Write-Verbose "Verarbeite Benutzer für Export: $($user.SamAccountName)"
 
                      $userExportObject = [ordered]@{
@@ -1414,10 +1423,18 @@ process {
              # 4. Daten für den Export aufbereiten (JETZT mit vollständigen Objekten)
              $exportData = [System.Collections.Generic.List[PSObject]]::new()
              Write-Log -Level Info -Message "Bereite Daten für den L-Kennung Export vor..."
-             foreach ($dn in $uniqueUserDNs) {
+
+             # Perform bulk query via pipeline safely
+             $fullUsers = $uniqueUserDNs | Get-ADUser -Properties $allPropertiesToGet -ErrorAction SilentlyContinue -ErrorVariable adErrors
+
+             if ($adErrors) {
+                 foreach ($err in $adErrors) {
+                     Write-Log -Level Warning -Message "Fehler beim Bulk-Abruf eines Benutzers: $($err.Exception.Message)"
+                 }
+             }
+
+             foreach ($user in $fullUsers) {
                  try {
-                     # Hole das vollständige Benutzerobjekt erneut
-                     $user = Get-ADUser -Identity $dn -Properties $allPropertiesToGet -ErrorAction Stop
                      Write-Verbose "Verarbeite Benutzer für Export: $($user.SamAccountName)"
 
                      $userExportObject = [ordered]@{
