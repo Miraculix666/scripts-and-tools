@@ -25,7 +25,7 @@ if ($allUsers.Count -gt 0) {
     $allUsers | Select-Object Name, SamAccountName, DistinguishedName | Format-Table -AutoSize
 
     # Write all SAMAccountNames in the given scope into a file
-    $allUsers | ForEach-Object { $_.SamAccountName | Out-File -Append -FilePath $samAccountNamesFilePath }
+    $allUsers | Select-Object -ExpandProperty SamAccountName | Out-File -Append -FilePath $samAccountNamesFilePath
 
     # Get all users and their last logon date
     $usersLastLogon = $allUsers | Get-ADUser -Properties LastLogonDate | Select-Object Name, SamAccountName, LastLogonDate
@@ -53,7 +53,8 @@ if ($allUsers.Count -gt 0) {
     }
 
     # Write all SAMAccountNames with logon older than 39 weeks into a file
-    $expiredUsers = $results | Where-Object { $_.LastLogonDate -like "xxxxx*" } | ForEach-Object { $_.SamAccountName | Out-File -Append -FilePath $expiredUsersFilePath }
+    $expiredUsers = $results | Where-Object { $_.LastLogonDate -like "xxxxx*" }
+    $expiredUsers | Select-Object -ExpandProperty SamAccountName | Out-File -Append -FilePath $expiredUsersFilePath
 
     # Display the results
     if ($results.Count -gt 0) {
@@ -103,7 +104,7 @@ if ($allDeactivatedUsers.Count -gt 0) {
     Write-Host "Output saved to: $outputFilePath"}
 
 # Write SamAccountNames to the file
-$allDeactivatedUsers | ForEach-Object { $_.SamAccountName | Out-File -Append -FilePath $outputFilePathSAM }
+$allDeactivatedUsers | Select-Object -ExpandProperty SamAccountName | Out-File -Append -FilePath $outputFilePathSAM
 # Display message about the file
 Write-Host "SamAccountNames have been written to: $outputFilePathSAM"
 ----------------------------------------------------------
@@ -131,7 +132,7 @@ if ($allDeactivatedUsers.Count -gt 0) {
     Write-Host "Output saved to: $outputFilePath"}
 
 # Write SamAccountNames to the file
-$allDeactivatedUsers | ForEach-Object { $_.SamAccountName | Out-File -Append -FilePath $outputFilePathSAM }
+$allDeactivatedUsers | Select-Object -ExpandProperty SamAccountName | Out-File -Append -FilePath $outputFilePathSAM
 # Display message about the file
 Write-Host "SamAccountNames have been written to: $outputFilePathSAM"
 
