@@ -405,85 +405,68 @@ function Download-Toolkit {
     }
 }
 
-function Mount-WinPE {
-    Write-Host "[3/9] Mounte WinPE Image..." -ForegroundColor Yellow
+function Repair-WinPEImage {
+    param (
+        [Parameter(Mandatory=$true)]
+        [string]$WimPath,
+
+        [Parameter(Mandatory=$true)]
+        [string]$WorkingPath
+    )
+
+    Write-Host "`n [REPAIR] Versuche automatische Reparatur..." -ForegroundColor Yellow
     
-    $wimPath = "$WorkingPath\media\sources\boot.wim"
-    
-    # Validiere boot.wim Existenz
-    if (-not (Test-Path $wimPath)) {
-        throw "boot.wim nicht gefunden: $wimPath"
+    # Backup erstellen
+    $backup = "$WimPath.backup_$(Get-Date -Format 'HHmmss')"
+    try {
+        Copy-Item $WimPath $backup -Force
+        Write-Verbose "Backup erstellt: $backup"
+    }
+    catch {
+        Write-Warning "Backup konnte nicht erstellt werden: $_"
     }
     
-    Write-Verbose "Prüfe boot.wim Format..."
-    
-    # Prüfe WIM-Format und -Integrität mit Get-WindowsImage
+    # Versuche DISM Export/Import zur Reparatur
     try {
-        $wimInfo = Get-WindowsImage -ImagePath $wimPath -ErrorAction Stop
-        Write-Host " [OK] boot.wim validiert - $($wimInfo.Count) Index/Indizes gefunden" -ForegroundColor Green
+        $tempWim = "$WorkingPath\temp_repair.wim"
+        Write-Verbose "DISM Export für Reparatur..."
         
-        # Zeige Image-Informationen
-        foreach ($img in $wimInfo) {
-            Write-Verbose "  Index $($img.ImageIndex): $($img.ImageName) ($([math]::Round($img.ImageSize / 1MB, 2)) MB)"
+        & dism /Export-Image /SourceImageFile:"$WimPath" /SourceIndex:1 /DestinationImageFile:"$tempWim" /Compress:max /CheckIntegrity
+
+        if ($LASTEXITCODE -eq 0 -and (Test-Path $tempWim)) {
+            Remove-Item $WimPath -Force
+            Move-Item $tempWim $WimPath -Force
+            Write-Host " [OK] boot.wim erfolgreich repariert" -ForegroundColor Green
+
+            # Validiere reparierte WIM
+            $wimInfo = Get-WindowsImage -ImagePath $WimPath
+            Write-Host " [OK] Reparierte WIM validiert" -ForegroundColor Green
+        }
+        else {
+            throw "DISM Export fehlgeschlagen (Exit-Code: $LASTEXITCODE)"
         }
     }
     catch {
-        Write-Host " [FEHLER] boot.wim ist ungültig oder beschädigt!" -ForegroundColor Red
-        Write-Host " [FEHLER] Details: $_" -ForegroundColor Red
-        Write-Host " [INFO] Mögliche Ursachen:" -ForegroundColor Yellow
-        Write-Host "  - ISO-Mount war unvollständig" -ForegroundColor Gray
-        Write-Host "  - Datei wurde während Kopiervorgang beschädigt" -ForegroundColor Gray
-        Write-Host "  - Falsches Image-Format (kein WIM)" -ForegroundColor Gray
+        Write-Host " [FEHLER] Automatische Reparatur fehlgeschlagen: $_" -ForegroundColor Red
         
-        Write-Host "`n [REPAIR] Versuche automatische Reparatur..." -ForegroundColor Yellow
-        
-        # Backup erstellen
-        $backup = "$wimPath.backup_$(Get-Date -Format 'HHmmss')"
-        try {
-            Copy-Item $wimPath $backup -Force
-            Write-Verbose "Backup erstellt: $backup"
-        }
-        catch {
-            Write-Warning "Backup konnte nicht erstellt werden: $_"
+        if (Test-Path $backup) {
+            Write-Host " [INFO] Stelle Backup wieder her..." -ForegroundColor Yellow
+            Copy-Item $backup $WimPath -Force
         }
         
-        # Versuche DISM Export/Import zur Reparatur
-        try {
-            $tempWim = "$WorkingPath\temp_repair.wim"
-            Write-Verbose "DISM Export für Reparatur..."
-            
-            & dism /Export-Image /SourceImageFile:"$wimPath" /SourceIndex:1 /DestinationImageFile:"$tempWim" /Compress:max /CheckIntegrity
-            
-            if ($LASTEXITCODE -eq 0 -and (Test-Path $tempWim)) {
-                Remove-Item $wimPath -Force
-                Move-Item $tempWim $wimPath -Force
-                Write-Host " [OK] boot.wim erfolgreich repariert" -ForegroundColor Green
-                
-                # Validiere reparierte WIM
-                $wimInfo = Get-WindowsImage -ImagePath $wimPath
-                Write-Host " [OK] Reparierte WIM validiert" -ForegroundColor Green
-            } 
-            else {
-                throw "DISM Export fehlgeschlagen (Exit-Code: $LASTEXITCODE)"
-            }
-        }
-        catch {
-            Write-Host " [FEHLER] Automatische Reparatur fehlgeschlagen: $_" -ForegroundColor Red
-            
-            if (Test-Path $backup) {
-                Write-Host " [INFO] Stelle Backup wieder her..." -ForegroundColor Yellow
-                Copy-Item $backup $wimPath -Force
-            }
-            
-            throw "boot.wim ist korrupt und konnte nicht repariert werden. Bitte verwenden Sie eine andere ISO-Quelle."
-        }
+        throw "boot.wim ist korrupt und konnte nicht repariert werden. Bitte verwenden Sie eine andere ISO-Quelle."
     }
-    
-    # Bereinige alte Mount-Versuche
-    Write-Verbose "Bereinige alte Mount-Punkte..."
-    & dism /Cleanup-Wim | Out-Null
-    
-    # Mount mit erweiterter Fehlerbehandlung
+}
+
+function Invoke-WinPEMount {
+    param (
+        [Parameter(Mandatory=$true)]
+        [string]$WimPath,
+
+        [Parameter(Mandatory=$true)]
+        [string]$MountPath
+    )
+
     $mountAttempts = 0
     $maxAttempts = 2
     $mounted = $false
@@ -496,7 +479,7 @@ function Mount-WinPE {
                 Write-Host " [RETRY] Mount-Versuch $mountAttempts von $maxAttempts..." -ForegroundColor Yellow
             }
             
-            Mount-WindowsImage -ImagePath $wimPath -Index 1 -Path $MountPath -ErrorAction Stop | Out-Null
+            Mount-WindowsImage -ImagePath $WimPath -Index 1 -Path $MountPath -ErrorAction Stop | Out-Null
             $mounted = $true
             Write-Host " [OK] WinPE erfolgreich gemountet" -ForegroundColor Green
         }
@@ -513,6 +496,47 @@ function Mount-WinPE {
             }
         }
     }
+}
+
+function Mount-WinPE {
+    Write-Host "[3/9] Mounte WinPE Image..." -ForegroundColor Yellow
+
+    $wimPath = "$WorkingPath\media\sources\boot.wim"
+
+    # Validiere boot.wim Existenz
+    if (-not (Test-Path $wimPath)) {
+        throw "boot.wim nicht gefunden: $wimPath"
+    }
+
+    Write-Verbose "Prüfe boot.wim Format..."
+
+    # Prüfe WIM-Format und -Integrität mit Get-WindowsImage
+    try {
+        $wimInfo = Get-WindowsImage -ImagePath $wimPath -ErrorAction Stop
+        Write-Host " [OK] boot.wim validiert - $($wimInfo.Count) Index/Indizes gefunden" -ForegroundColor Green
+
+        # Zeige Image-Informationen
+        foreach ($img in $wimInfo) {
+            Write-Verbose "  Index $($img.ImageIndex): $($img.ImageName) ($([math]::Round($img.ImageSize / 1MB, 2)) MB)"
+        }
+    }
+    catch {
+        Write-Host " [FEHLER] boot.wim ist ungültig oder beschädigt!" -ForegroundColor Red
+        Write-Host " [FEHLER] Details: $_" -ForegroundColor Red
+        Write-Host " [INFO] Mögliche Ursachen:" -ForegroundColor Yellow
+        Write-Host "  - ISO-Mount war unvollständig" -ForegroundColor Gray
+        Write-Host "  - Datei wurde während Kopiervorgang beschädigt" -ForegroundColor Gray
+        Write-Host "  - Falsches Image-Format (kein WIM)" -ForegroundColor Gray
+
+        Repair-WinPEImage -WimPath $wimPath -WorkingPath $WorkingPath
+    }
+
+    # Bereinige alte Mount-Versuche
+    Write-Verbose "Bereinige alte Mount-Punkte..."
+    & dism /Cleanup-Wim | Out-Null
+
+    # Mount mit erweiterter Fehlerbehandlung
+    Invoke-WinPEMount -WimPath $wimPath -MountPath $MountPath
 }
 
 function Create-WinPELauncher {
