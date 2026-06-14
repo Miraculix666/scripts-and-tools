@@ -87,15 +87,8 @@ function Write-Log {
 # [FIX-1] Umbenannt von 'Start-Process' -> 'Invoke-Main'
 # Grund: 'Start-Process' ist ein eingebautes PowerShell-Cmdlet.
 # Eine gleichnamige Funktion führt zu Namenskonflikt und unerwartetem Verhalten.
-function Invoke-Main {
-    Show-Header
-    Import-Module ActiveDirectory
-
-    if (-not $CsvPath) { $CsvPath = Read-Host "Pfad zur Master-CSV eingeben" }
-    $CsvPath = $CsvPath.Trim().Trim('"')
-    if (-not (Test-Path $CsvPath)) { Write-Log "Master-CSV nicht gefunden: '$CsvPath'" "ERROR"; return }
-
-    # 1. BEDARFSLISTE
+function Get-RequiredList {
+    param([string]$RequiredCsvPath)
     $RequiredList = New-Object System.Collections.Generic.HashSet[string]
     if ($RequiredCsvPath -and (Test-Path $RequiredCsvPath)) {
         Write-Log "Lade Bedarfsliste..." "DEBUG"
@@ -105,8 +98,11 @@ function Invoke-Main {
         }
         Write-Log "Bedarfsliste geladen ($($RequiredList.Count) Einträge)." "SUCCESS"
     }
+    return $RequiredList
+}
 
-    # 2. MASTER-CSV
+function Get-MasterCsvData {
+    param([string]$CsvPath)
     Write-Log "Lese Master-CSV..." "DEBUG"
     $MasterCsvData = @{}
     $RawCsv = Import-Csv -Path $CsvPath -Delimiter ';' -Encoding Default
@@ -115,8 +111,11 @@ function Invoke-Main {
         if ($key) { $MasterCsvData[$key] = $line }
     }
     Write-Log "Master-CSV geladen ($($MasterCsvData.Count) Zeilen)." "SUCCESS"
+    return $MasterCsvData
+}
 
-    # 3. AD-DISCOVERY
+function Invoke-ADDiscovery {
+    param([switch]$SearchGlobal, [hashtable]$MasterCsvData, [int]$TestCount)
     Write-Log "Schritt 1: AD-Discovery (OUs 81/82)..." "INFO"
     $ADCache = @{}
     $UniqueGroups = New-Object System.Collections.Generic.HashSet[string]
@@ -166,9 +165,24 @@ function Invoke-Main {
         $ProcessList = $AllUniqueSAMs | Select-Object -First $TestCount 
     }
 
-    Write-Log "Discovery beendet ($($Stopwatch.Elapsed.TotalSeconds.ToString('F2'))s). Starte Verarbeitung von $($ProcessList.Count) Einträgen..." "SUCCESS"
+    return @{
+        ADCache = $ADCache
+        SortedGroups = $SortedGroups
+        ProcessList = $ProcessList
+    }
+}
 
-    # 4. PARALLELE VERARBEITUNG
+function Invoke-ParallelProcessing {
+    param(
+        $ProcessList,
+        $MasterCsvData,
+        $ADCache,
+        $RequiredList,
+        $SortedGroups,
+        [int]$MaxThreads,
+        [string]$LogFile
+    )
+
     $SessionState = [system.management.automation.runspaces.initialsessionstate]::CreateDefault()
     $Pool = [runspacefactory]::CreateRunspacePool(1, $MaxThreads, $SessionState, $Host)
     $Pool.Open()
@@ -378,14 +392,20 @@ function Invoke-Main {
     $Pool.Close()
     $Pool.Dispose()
 
+    return @{
+        Results = $Results
+        ErrCount = $ErrCount
+    }
+}
+
+function Export-Results {
+    param($Results, $SortedGroups, $ScriptDir, $Version, $LogFile)
+
     # 5. EXPORTE
     # [FIX-6] Bounds-Check vor $Results[0]-Zugriff
     if ($Results.Count -eq 0) {
         Write-Log "FEHLER: Keine Ergebnisse generiert. Bitte Eingabedaten und AD-Verbindung prüfen." "ERROR"
-        return
-    }
-    if ($ErrCount -gt 0) {
-        Write-Log "WARNUNG: $ErrCount Runspace-Fehler aufgetreten. Details im Log: $LogFile" "WARN"
+        return $null
     }
 
     Write-Log "Erzeuge Ausgabedateien ($($Results.Count) Datensätze)..." "INFO"
@@ -415,14 +435,17 @@ function Invoke-Main {
     }
     $CsvLines | Out-File -FilePath $Path2 -Encoding UTF8 -Force
 
-    $Stopwatch.Stop()
+    return @{ Path1 = $Path1; Path2 = $Path2 }
+}
 
+function Show-Summary {
+    param($Version, $ResultsCount, $ErrCount, $Stopwatch, $Path1, $Path2, $LogFile)
     # FINALER OUTPUT
     Write-Host "`n====================================================" -ForegroundColor Cyan
     Write-Host "ERGEBNISSE:" -ForegroundColor Yellow
     Write-Host "VERSION:`t$Version"
     Write-Host "DATUM:`t`t$(Get-Date -Format 'dd.MM.yyyy HH:mm:ss')"
-    Write-Host "ZEILEN:`t`t$($Results.Count)"
+    Write-Host "ZEILEN:`t`t$ResultsCount"
     Write-Host "FEHLER:`t`t$ErrCount"
     Write-Host "DAUER:`t`t$($Stopwatch.Elapsed.TotalSeconds.ToString('F2'))s"
     Write-Host "TABELLE 1:`t$Path1"
@@ -431,5 +454,46 @@ function Invoke-Main {
     Write-Host "====================================================`n" -ForegroundColor Cyan
 }
 
+function Invoke-Main {
+    Show-Header
+    Import-Module ActiveDirectory
+
+    if (-not $CsvPath) { $CsvPath = Read-Host "Pfad zur Master-CSV eingeben" }
+    $CsvPath = $CsvPath.Trim().Trim('"')
+    if (-not (Test-Path $CsvPath)) { Write-Log "Master-CSV nicht gefunden: '$CsvPath'" "ERROR"; return }
+
+    # 1. BEDARFSLISTE
+    $RequiredList = Get-RequiredList -RequiredCsvPath $RequiredCsvPath
+
+    # 2. MASTER-CSV
+    $MasterCsvData = Get-MasterCsvData -CsvPath $CsvPath
+
+    # 3. AD-DISCOVERY
+    $Discovery = Invoke-ADDiscovery -SearchGlobal:$SearchGlobal -MasterCsvData $MasterCsvData -TestCount $TestCount
+    $ADCache = $Discovery.ADCache
+    $SortedGroups = $Discovery.SortedGroups
+    $ProcessList = $Discovery.ProcessList
+
+    Write-Log "Discovery beendet ($($Stopwatch.Elapsed.TotalSeconds.ToString('F2'))s). Starte Verarbeitung von $($ProcessList.Count) Einträgen..." "SUCCESS"
+
+    # 4. PARALLELE VERARBEITUNG
+    $Processing = Invoke-ParallelProcessing -ProcessList $ProcessList -MasterCsvData $MasterCsvData -ADCache $ADCache -RequiredList $RequiredList -SortedGroups $SortedGroups -MaxThreads $MaxThreads -LogFile $LogFile
+    $Results = $Processing.Results
+    $ErrCount = $Processing.ErrCount
+
+    if ($ErrCount -gt 0) {
+        Write-Log "WARNUNG: $ErrCount Runspace-Fehler aufgetreten. Details im Log: $LogFile" "WARN"
+    }
+
+    # 5. EXPORTE
+    $Exports = Export-Results -Results $Results -SortedGroups $SortedGroups -ScriptDir $ScriptDir -Version $Version -LogFile $LogFile
+
+    $Stopwatch.Stop()
+
+    # FINALER OUTPUT
+    if ($Exports) {
+        Show-Summary -Version $Version -ResultsCount $Results.Count -ErrCount $ErrCount -Stopwatch $Stopwatch -Path1 $Exports.Path1 -Path2 $Exports.Path2 -LogFile $LogFile
+    }
+}
 # [FIX-1] Aufruf der umbenannten Funktion
 Invoke-Main
