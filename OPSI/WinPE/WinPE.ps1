@@ -313,14 +313,9 @@ function Set-GermanLocale {
     }
 }
 
-# --- FUNCTION: New-LauncherMenu ---
-function New-LauncherMenu {
-    param([string]$MountPath)
-    
-    Write-Host " [MENU] Erstelle Launcher-Menü..." -ForegroundColor Cyan
-    Write-Log "Erstelle LaunchMenu.ps1"
-    
-    $MenuScript = @'
+# --- FUNCTION: Get-LaunchMenuContent ---
+function Get-LaunchMenuContent {
+    return @'
 function Show-Menu {
     Clear-Host
     Write-Host "===============================================" -ForegroundColor Cyan
@@ -412,14 +407,11 @@ do {
     }
 } while ($true)
 '@
-    
-    $MenuPath = Join-Path $MountPath "Windows\System32\LaunchMenu.ps1"
-    $MenuScript | Out-File $MenuPath -Encoding ASCII -Force
-    Write-Log "LaunchMenu.ps1 erstellt: $MenuPath" -Level SUCCESS
-    
-    # Anpassung startnet.cmd
-    $StartnetPath = Join-Path $MountPath "Windows\System32\startnet.cmd"
-    $Startnet = @"
+}
+
+# --- FUNCTION: Get-StartnetContent ---
+function Get-StartnetContent {
+    return @"
 @echo off
 wpeinit
 echo.
@@ -444,6 +436,25 @@ if exist X:\opsi-client-agent\opsi-client-agent.exe (
 
 cmd.exe
 "@
+}
+
+# --- FUNCTION: New-LauncherMenu ---
+function New-LauncherMenu {
+    param([string]$MountPath)
+
+    Write-Host " [MENU] Erstelle Launcher-Menü..." -ForegroundColor Cyan
+    Write-Log "Erstelle LaunchMenu.ps1"
+
+    $MenuScript = Get-LaunchMenuContent
+
+    $MenuPath = Join-Path $MountPath "Windows\System32\LaunchMenu.ps1"
+    $MenuScript | Out-File $MenuPath -Encoding ASCII -Force
+    Write-Log "LaunchMenu.ps1 erstellt: $MenuPath" -Level SUCCESS
+
+    # Anpassung startnet.cmd
+    $StartnetPath = Join-Path $MountPath "Windows\System32\startnet.cmd"
+    $Startnet = Get-StartnetContent
+
     $Startnet | Out-File $StartnetPath -Encoding ASCII -Force
     Write-Log "startnet.cmd erstellt/angepasst: $StartnetPath" -Level SUCCESS
     
