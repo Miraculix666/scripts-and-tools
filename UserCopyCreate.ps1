@@ -293,3 +293,40 @@ function New-CustomADUser {
 
             $userParams = @{
                 Name = $Name
+                SamAccountName = $SamAccountName
+                UserPrincipalName = $UserPrincipalName
+                Path = $OU
+                AccountPassword = $Password
+                Enabled = $true
+                ChangePasswordAtLogon = $true
+            }
+
+            if ($GivenName) { $userParams.GivenName = $GivenName }
+            if ($Surname) { $userParams.Surname = $Surname }
+            if ($Department) { $userParams.Department = $Department }
+            if ($Title) { $userParams.Title = $Title }
+            if ($Manager) { $userParams.Manager = $Manager }
+            if ($Office) { $userParams.Office = $Office }
+            if ($OfficePhone) { $userParams.OfficePhone = $OfficePhone }
+            if ($Company) { $userParams.Company = $Company }
+            if ($Description) { $userParams.Description = $Description }
+
+            New-ADUser @userParams -ErrorAction Stop
+            Write-CustomLog "Benutzer '$Name' ($SamAccountName) erfolgreich erstellt." -Level "INFO"
+
+            if ($Groups) {
+                foreach ($group in $Groups) {
+                    try {
+                        Add-ADGroupMember -Identity $group -Members $SamAccountName -ErrorAction Stop
+                        Write-Verbose "Benutzer zur Gruppe '$group' hinzugefügt."
+                    } catch {
+                        Write-CustomLog "Fehler beim Hinzufügen von Benutzer '$SamAccountName' zu Gruppe '$group': $_" -Level "WARNUNG"
+                    }
+                }
+            }
+        }
+    } catch {
+        Write-CustomLog "Fehler bei der Erstellung des Benutzers '$Name': $_" -Level "FEHLER"
+        throw
+    }
+}
