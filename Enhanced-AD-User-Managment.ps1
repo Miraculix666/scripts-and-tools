@@ -1269,7 +1269,13 @@ process {
              }
 
              # Duplikate entfernen
-             $uniqueFoundUsers = $allFoundUsers | Select-Object -Unique -Property DistinguishedName
+             $uniqueFoundUsersHash = @{}
+             foreach ($u in $allFoundUsers) {
+                 if (-not $uniqueFoundUsersHash.ContainsKey($u.DistinguishedName)) {
+                     $uniqueFoundUsersHash[$u.DistinguishedName] = $u
+                 }
+             }
+             $uniqueFoundUsers = $uniqueFoundUsersHash.Values
              Write-Log -Level Info -Message "Insgesamt $($uniqueFoundUsers.Count) eindeutige Benutzer gefunden."
 
              if ($uniqueFoundUsers.Count -eq 0) {
@@ -1280,10 +1286,8 @@ process {
              # 4. Daten für den Export aufbereiten
              $exportData = [System.Collections.Generic.List[PSObject]]::new()
              Write-Log -Level Info -Message "Bereite Daten für den Export vor..."
-             foreach ($userDN in ($uniqueFoundUsers | Select-Object -ExpandProperty DistinguishedName)) { # Iteriere über DNs
+             foreach ($user in $uniqueFoundUsers) { # Iteriere über die bereits geladenen User-Objekte
                  try {
-                     # Hole das vollständige Benutzerobjekt erneut
-                     $user = Get-ADUser -Identity $userDN -Properties $allPropertiesToGet -ErrorAction Stop
                      Write-Verbose "Verarbeite Benutzer für Export: $($user.SamAccountName)"
 
                      $userExportObject = [ordered]@{
@@ -1307,9 +1311,9 @@ process {
                      $userExportObject['GroupNames'] = $groupNames -join ','
                      $exportData.Add([PSCustomObject]$userExportObject)
                  } catch {
-                      Write-Log -Level Warning -Message "Fehler beim erneuten Abrufen oder Verarbeiten des Benutzers mit DN '$userDN': $_"
+                      Write-Log -Level Warning -Message "Fehler beim Verarbeiten des Benutzers '$($user.SamAccountName)': $_"
                  }
-             } # End foreach userDN
+             } # End foreach user
 
              # 5. Nach CSV exportieren
              if($exportData.Count -eq 0){
@@ -1402,22 +1406,26 @@ process {
              }
 
              # Duplikate entfernen, falls OUs verschachtelt waren oder Benutzer in mehreren gefunden wurden
-             # KORREKTUR (v6.2): Eindeutige DNs extrahieren, DANN die vollen Objekte neu laden
-             $uniqueUserDNs = $allFoundUsers | Select-Object -ExpandProperty DistinguishedName -Unique
-             Write-Log -Level Info -Message "Insgesamt $($uniqueUserDNs.Count) eindeutige Benutzer-DNs gefunden."
+             # KORREKTUR (v6.2 / opt): Hashtable nutzen, um die vollen Objekte effizient zu behalten
+             $uniqueFoundUsersHash = @{}
+             foreach ($u in $allFoundUsers) {
+                 if (-not $uniqueFoundUsersHash.ContainsKey($u.DistinguishedName)) {
+                     $uniqueFoundUsersHash[$u.DistinguishedName] = $u
+                 }
+             }
+             $uniqueFoundUsers = $uniqueFoundUsersHash.Values
+             Write-Log -Level Info -Message "Insgesamt $($uniqueFoundUsers.Count) eindeutige Benutzer gefunden."
 
-             if ($uniqueUserDNs.Count -eq 0) {
+             if ($uniqueFoundUsers.Count -eq 0) {
                  Write-Log -Level Warning -Message "Keine Benutzer für die angegebenen Kriterien gefunden."
                  return
              }
 
-             # 4. Daten für den Export aufbereiten (JETZT mit vollständigen Objekten)
+             # 4. Daten für den Export aufbereiten (JETZT mit bereits geladenen Objekten)
              $exportData = [System.Collections.Generic.List[PSObject]]::new()
              Write-Log -Level Info -Message "Bereite Daten für den L-Kennung Export vor..."
-             foreach ($dn in $uniqueUserDNs) {
+             foreach ($user in $uniqueFoundUsers) {
                  try {
-                     # Hole das vollständige Benutzerobjekt erneut
-                     $user = Get-ADUser -Identity $dn -Properties $allPropertiesToGet -ErrorAction Stop
                      Write-Verbose "Verarbeite Benutzer für Export: $($user.SamAccountName)"
 
                      $userExportObject = [ordered]@{
@@ -1441,9 +1449,9 @@ process {
                      $userExportObject['GroupNames'] = $groupNames -join ','
                      $exportData.Add([PSCustomObject]$userExportObject)
                  } catch {
-                      Write-Log -Level Warning -Message "Fehler beim erneuten Abrufen oder Verarbeiten des Benutzers mit DN '$dn': $_"
+                      Write-Log -Level Warning -Message "Fehler beim Verarbeiten des Benutzers '$($user.SamAccountName)': $_"
                  }
-             } # End foreach dn
+             } # End foreach user
 
              # 5. Nach CSV exportieren
              if($exportData.Count -eq 0){
