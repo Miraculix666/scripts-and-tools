@@ -155,11 +155,8 @@ Function Create-RDPFile {
     }
 }
 
-Function Start-EmailWorkflow {
-    <# Versendet E-Mails. Gibt $true/$false zurück. Unterdrückt COM-Ausgaben. #>
-    param($UserName, $RDPFilePaths, $MSGSavePath, $Send, $SmtpServer, $Credential)
-    
-    # 1. AD Daten (Vorname Nachname)
+Function Get-RDPEmailRecipient {
+    param($UserName)
     try {
         if (-not (Get-Module -Name ActiveDirectory)) { Import-Module ActiveDirectory -ErrorAction Stop }
         $adUser = Get-ADUser -Identity $UserName -Properties GivenName, Surname, EmailAddress -ErrorAction Stop
@@ -167,11 +164,10 @@ Function Start-EmailWorkflow {
         $msg = "AD-Fehler ($UserName): $($_.Exception.Message)"
         Write-Warning $msg
         if ($Global:GlobalErrorLog) { $Global:GlobalErrorLog.Add($msg) | Out-Null }
-        return $false
+        return $null
     }
     
     $to = $adUser.EmailAddress
-    # Verbesserte Anrede Logik
     if ($adUser.GivenName -and $adUser.Surname) {
         $fullName = "$($adUser.GivenName) $($adUser.Surname)"
     } else {
@@ -182,13 +178,17 @@ Function Start-EmailWorkflow {
         $msg = "Keine E-Mail im AD für $UserName."
         Write-Warning $msg
         if ($Global:GlobalErrorLog) { $Global:GlobalErrorLog.Add($msg) | Out-Null }
-        return $false
+        return $null
     }
     
-    # 2. E-Mail Text (Professionell & Ausführlich)
+    return [PSCustomObject]@{ To = $to; FullName = $fullName }
+}
+
+Function Get-RDPEmailBody {
+    param($FullName)
     $sb = [System.Text.StringBuilder]::new()
     $sb.AppendLine("<html><body style='font-family:Calibri, Arial, sans-serif; font-size:11pt; color:#333;'>") | Out-Null
-    $sb.AppendLine("<p>Guten Tag $fullName,</p>") | Out-Null
+    $sb.AppendLine("<p>Guten Tag $FullName,</p>") | Out-Null
     $sb.AppendLine("<p>anbei erhalten Sie Ihre persönlichen Zugangsdateien für den Remote-Desktop-Zugriff auf die Schulungsrechner.</p>") | Out-Null
     $sb.AppendLine("<div style='background-color:#f9f9f9; padding:15px; border-left: 4px solid #0078d4; margin: 10px 0;'>") | Out-Null
     $sb.AppendLine("<strong>Ihre Schritte zur Anmeldung:</strong>") | Out-Null
@@ -201,66 +201,84 @@ Function Start-EmailWorkflow {
     $sb.AppendLine("<p>Sollten Probleme bei der Verbindung auftreten, wenden Sie sich bitte an den IT-Support.</p>") | Out-Null
     $sb.AppendLine("<br><p style='font-size:9pt; color:#888;'>Dies ist eine automatisch generierte Nachricht.</p>") | Out-Null
     $sb.AppendLine("</body></html>") | Out-Null
-    $body = $sb.ToString()
+    return $sb.ToString()
+}
+
+Function Send-RDPEmailSmtp {
+    param($UserName, $To, $Subject, $Body, $RDPFilePaths, $SmtpServer, $Credential, $Send)
+    if (-not $Send) { return $false }
+    if ($null -eq $Credential) {
+        Write-Host " SMTP-Login erforderlich..." -ForegroundColor Yellow
+        $Credential = Get-Credential -Message "SMTP Login ($SmtpServer)"
+    }
+    $p = @{ To=$To; From=$To; Subject=$Subject; Body=$Body; BodyAsHtml=$true; SmtpServer=$SmtpServer; Attachments=$RDPFilePaths; ErrorAction='Stop' }
+    if ($Credential.UserName) { $p.Add('Credential', $Credential) }
+
+    try {
+        Send-MailMessage @p
+        Write-Host (" [SMTP] Gesendet: {0}" -f $To) -ForegroundColor Cyan
+        return $true
+    } catch {
+        Write-Warning "SMTP-Fehler ($UserName): $($_.Exception.Message)"
+        return $false
+    }
+}
+
+Function Send-RDPEmailOutlook {
+    param($UserName, $To, $Subject, $Body, $RDPFilePaths, $MSGSavePath, $Send)
+    try {
+        try { $outlook = [System.Runtime.InteropServices.Marshal]::GetActiveObject('Outlook.Application') }
+        catch { $outlook = New-Object -ComObject Outlook.Application }
+
+        if (!$outlook) { throw "Outlook läuft nicht/nicht installiert." }
+
+        $mail = $outlook.CreateItem(0)
+        $mail.Subject = $Subject
+        $mail.To = $To
+        $mail.HTMLBody = $Body
+
+        foreach ($f in $RDPFilePaths) {
+            if (Test-Path $f) {
+                [void]$mail.Attachments.Add($f) # Cast [void] unterdrückt Output
+            }
+        }
+        
+        if ($MSGSavePath) {
+            [void]$mail.SaveAs($MSGSavePath, 3) # 3=olMsg. Speichern.
+            Write-Host (" [MSG] Gespeichert: {0}" -f ($MSGSavePath | Split-Path -Leaf)) -ForegroundColor Green
+        }
+        if ($Send) {
+            [void]$mail.Send()
+            Write-Host (" [OUTLOOK] Gesendet: {0}" -f $To) -ForegroundColor Cyan
+        }
+
+        # Cleanup Versuch
+        [System.Runtime.InteropServices.Marshal]::ReleaseComObject($mail) | Out-Null
+        return $true
+    } catch {
+        $err = $_.Exception.Message
+        Write-Warning "Outlook-Fehler ($UserName): $err"
+        return $false
+    }
+}
+
+Function Start-EmailWorkflow {
+    <# Versendet E-Mails. Gibt $true/$false zurück. Unterdrückt COM-Ausgaben. #>
+    param($UserName, $RDPFilePaths, $MSGSavePath, $Send, $SmtpServer, $Credential)
+
+    # 1. AD Daten (Vorname Nachname)
+    $recipient = Get-RDPEmailRecipient -UserName $UserName
+    if (-not $recipient) { return $false }
+
+    # 2. E-Mail Text
+    $body = Get-RDPEmailBody -FullName $recipient.FullName
     $subj = "IT-Support: Ihre RDP-Verbindungsdaten"
 
     # 3. Versand
     if ($SmtpServer) {
-        # SMTP
-        if (-not $Send) { return $false }
-        if ($null -eq $Credential) {
-            Write-Host " SMTP-Login erforderlich..." -ForegroundColor Yellow
-            $Credential = Get-Credential -Message "SMTP Login ($SmtpServer)"
-        }
-        $p = @{ To=$to; From=$to; Subject=$subj; Body=$body; BodyAsHtml=$true; SmtpServer=$SmtpServer; Attachments=$RDPFilePaths; ErrorAction='Stop' }
-        if ($Credential.UserName) { $p.Add('Credential', $Credential) }
-        
-        try {
-            Send-MailMessage @p
-            Write-Host (" [SMTP] Gesendet: {0}" -f $to) -ForegroundColor Cyan
-            return $true
-        } catch {
-            Write-Warning "SMTP-Fehler ($UserName): $($_.Exception.Message)"
-            return $false
-        }
-    }
-    else {
-        # OUTLOOK (COM)
-        # WICHTIG: Hier darf kein Admin-Recht aktiv sein!
-        try {
-            try { $outlook = [System.Runtime.InteropServices.Marshal]::GetActiveObject('Outlook.Application') } 
-            catch { $outlook = New-Object -ComObject Outlook.Application }
-            
-            if (!$outlook) { throw "Outlook läuft nicht/nicht installiert." }
-            
-            $mail = $outlook.CreateItem(0)
-            $mail.Subject = $subj
-            $mail.To = $to
-            $mail.HTMLBody = $body
-            
-            foreach ($f in $RDPFilePaths) { 
-                if (Test-Path $f) { 
-                    [void]$mail.Attachments.Add($f) # Cast [void] unterdrückt Output
-                } 
-            }
-            
-            if ($MSGSavePath) {
-                [void]$mail.SaveAs($MSGSavePath, 3) # 3=olMsg. Speichern.
-                Write-Host (" [MSG] Gespeichert: {0}" -f ($MSGSavePath | Split-Path -Leaf)) -ForegroundColor Green
-            }
-            if ($Send) {
-                [void]$mail.Send()
-                Write-Host (" [OUTLOOK] Gesendet: {0}" -f $to) -ForegroundColor Cyan
-            }
-            
-            # Cleanup Versuch
-            [System.Runtime.InteropServices.Marshal]::ReleaseComObject($mail) | Out-Null
-            return $true
-        } catch {
-            $err = $_.Exception.Message
-            Write-Warning "Outlook-Fehler ($UserName): $err"
-            return $false
-        }
+        return Send-RDPEmailSmtp -UserName $UserName -To $recipient.To -Subject $subj -Body $body -RDPFilePaths $RDPFilePaths -SmtpServer $SmtpServer -Credential $Credential -Send $Send
+    } else {
+        return Send-RDPEmailOutlook -UserName $UserName -To $recipient.To -Subject $subj -Body $body -RDPFilePaths $RDPFilePaths -MSGSavePath $MSGSavePath -Send $Send
     }
 }
 
@@ -278,13 +296,21 @@ Function Generate-SendMailsScript {
     $sendBool = if ($SaveAsMsgOnly) { "`$false" } else { "`$true" }
     
     # Funktions-Body kopieren
-    $funcDef = (Get-Command Start-EmailWorkflow).Definition
+    $funcDefRecip = (Get-Command Get-RDPEmailRecipient).Definition
+    $funcDefBody = (Get-Command Get-RDPEmailBody).Definition
+    $funcDefSmtp = (Get-Command Send-RDPEmailSmtp).Definition
+    $funcDefOutl = (Get-Command Send-RDPEmailOutlook).Definition
+    $funcDefWork = (Get-Command Start-EmailWorkflow).Definition
 
     $sb = [System.Text.StringBuilder]::new()
     $sb.AppendLine("# AUTOMATISCH GENERIERTES SCRIPT - FUER USER-KONTEXT") | Out-Null
     $sb.AppendLine("# Ausfuehren als: NORMALER BENUTZER (Mit Outlook-Zugriff)") | Out-Null
     $sb.AppendLine("param(`$AltSmtp)") | Out-Null
-    $sb.AppendLine("Function Start-EmailWorkflow { $funcDef }") | Out-Null
+    $sb.AppendLine("Function Get-RDPEmailRecipient { $funcDefRecip }") | Out-Null
+    $sb.AppendLine("Function Get-RDPEmailBody { $funcDefBody }") | Out-Null
+    $sb.AppendLine("Function Send-RDPEmailSmtp { $funcDefSmtp }") | Out-Null
+    $sb.AppendLine("Function Send-RDPEmailOutlook { $funcDefOutl }") | Out-Null
+    $sb.AppendLine("Function Start-EmailWorkflow { $funcDefWork }") | Out-Null
     $sb.AppendLine("") | Out-Null
     $sb.AppendLine("`$Users = @($uStr)") | Out-Null
     $sb.AppendLine("`$Files = @($rStr)") | Out-Null

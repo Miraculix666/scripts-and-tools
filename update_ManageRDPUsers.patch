@@ -1,0 +1,34 @@
+--- Manage-RDPUsers.ps1
++++ Manage-RDPUsers.ps1
+@@ -155,7 +155,31 @@
+     }
+ }
+
++Function Get-RDPEmailRecipient {
++    param($UserName)
++    try {
++        if (-not (Get-Module -Name ActiveDirectory)) { Import-Module ActiveDirectory -ErrorAction Stop }
++        $adUser = Get-ADUser -Identity $UserName -Properties GivenName, Surname, EmailAddress -ErrorAction Stop
++    } catch {
++        $msg = "AD-Fehler ($UserName): $($_.Exception.Message)"
++        Write-Warning $msg
++        if ($Global:GlobalErrorLog) { $Global:GlobalErrorLog.Add($msg) | Out-Null }
++        return $null
++    }
++
++    $to = $adUser.EmailAddress
++    if ($adUser.GivenName -and $adUser.Surname) { $fullName = "$($adUser.GivenName) $($adUser.Surname)" }
++    else { $fullName = $UserName }
++
++    if (-not $to) {
++        $msg = "Keine E-Mail im AD für $UserName."
++        Write-Warning $msg
++        if ($Global:GlobalErrorLog) { $Global:GlobalErrorLog.Add($msg) | Out-Null }
++        return $null
++    }
++    return [PSCustomObject]@{ To = $to; FullName = $fullName }
++}
++
+ Function Start-EmailWorkflow {
+     <# Versendet E-Mails. Gibt $true/$false zurück. Unterdrückt COM-Ausgaben. #>
+     param($UserName, $RDPFilePaths, $MSGSavePath, $Send, $SmtpServer, $Credential)
