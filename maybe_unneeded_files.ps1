@@ -196,16 +196,14 @@ function Find-Duplicates {
     }
 }
 
-# Function to generate HTML report
-function New-HTMLReport {
+# Function to generate HTML report header
+function Get-HTMLTemplateHeader {
     param(
         [Parameter(Mandatory=$true)]
-        [string]$Title,
-        [Parameter(Mandatory=$true)]
-        [string[]]$FilePaths
+        [string]$Title
     )
     
-    $htmlTemplate = @"
+    return @"
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -326,29 +324,11 @@ function New-HTMLReport {
         
         <div class="file-list">
 "@
-    
-    try {
-        $outputPath = Join-Path $OutputDirectory "$Title.html"
-        
-        $htmlContent = $htmlTemplate
-        
-        foreach ($filePath in $FilePaths) {
-            if (Test-Path $filePath) {
-                $files = Get-Content $filePath
-                foreach ($file in $files) {
-                    $isArchived = $file -match "\\---ARCHIVE---\\"
-                    $class = if ($isArchived) { 'archive' } else { '' }
-                    $htmlContent += @"
-                    <div class="file-item $class">
-                        <span class="file-icon">📄</span>
-                        <span class="file-path">$([System.Web.HttpUtility]::HtmlEncode($file))</span>
-                    </div>
-"@
-                }
-            }
-        }
-        
-        $htmlContent += @"
+}
+
+# Function to generate HTML report footer
+function Get-HTMLTemplateFooter {
+    return @"
         </div>
     </div>
     <script>
@@ -380,6 +360,40 @@ function New-HTMLReport {
 </body>
 </html>
 "@
+}
+
+# Function to generate HTML report
+function New-HTMLReport {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$Title,
+        [Parameter(Mandatory=$true)]
+        [string[]]$FilePaths
+    )
+
+    try {
+        $outputPath = Join-Path $OutputDirectory "$Title.html"
+
+        $htmlHeader = Get-HTMLTemplateHeader -Title $Title
+        $htmlFooter = Get-HTMLTemplateFooter
+
+        $fileItemsHtml = foreach ($filePath in $FilePaths) {
+            if (Test-Path $filePath) {
+                $files = Get-Content $filePath
+                foreach ($file in $files) {
+                    $isArchived = $file -match "\\---ARCHIVE---\\"
+                    $class = if ($isArchived) { 'archive' } else { '' }
+                    @"
+                    <div class="file-item $class">
+                        <span class="file-icon">📄</span>
+                        <span class="file-path">$([System.Web.HttpUtility]::HtmlEncode($file))</span>
+                    </div>
+"@
+                }
+            }
+        }
+
+        $htmlContent = $htmlHeader + ($fileItemsHtml -join "`n") + $htmlFooter
         
         $htmlContent | Out-File -FilePath $outputPath -Encoding UTF8
         Write-Log "Generated HTML report: $outputPath" -Level Info
