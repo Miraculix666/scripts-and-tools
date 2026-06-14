@@ -74,17 +74,8 @@ function Get-GroupName {
     return $name
 }
 
-function Invoke-Main {
-    Show-Header
-    Import-Module ActiveDirectory
-
-    if (-not $CsvPath) { $CsvPath = Read-Host "Pfad zur Master-CSV eingeben" }
-    $CsvPath = $CsvPath.Trim().Trim('"')
-    if (-not (Test-Path $CsvPath)) {
-        Write-Log "Master-CSV nicht gefunden: '$CsvPath'" "ERROR"
-        return
-    }
-
+function Get-RequiredList {
+    param([string]$RequiredCsvPath)
     # ----------------------------------------------------------------
     # 1. BEDARFSLISTE laden
     # ----------------------------------------------------------------
@@ -100,6 +91,10 @@ function Invoke-Main {
         Write-Log "Bedarfsliste: $($RequiredList.Count) Eintraege." "SUCCESS"
     }
 
+    return $RequiredList
+}
+function Get-MasterCsvData {
+    param([string]$CsvPath)
     # ----------------------------------------------------------------
     # 2. MASTER-CSV laden
     # ----------------------------------------------------------------
@@ -113,6 +108,10 @@ function Invoke-Main {
     }
     Write-Log "Master-CSV: $($MasterCsvData.Count) Zeilen." "SUCCESS"
 
+    return $MasterCsvData
+}
+function Invoke-ADDiscovery {
+    param([hashtable]$MasterCsvData, [switch]$SearchGlobal, [int]$TestCount)
     # ----------------------------------------------------------------
     # 3. AD-DISCOVERY
     # ----------------------------------------------------------------
@@ -170,6 +169,14 @@ function Invoke-Main {
     Write-Log ("Discovery: {0}s. Verarbeite {1} Eintraege..." -f `
         $Stopwatch.Elapsed.TotalSeconds.ToString('F2'), $ProcessList.Count) "SUCCESS"
 
+    return [PSCustomObject]@{
+        ADCache = $ADCache
+        SortedGroups = $SortedGroups
+        ProcessList = $ProcessList
+    }
+}
+function Invoke-ProcessingJobs {
+    param([array]$ProcessList, [hashtable]$MasterCsvData, [hashtable]$ADCache, [System.Collections.Generic.HashSet[string]]$RequiredList, [array]$SortedGroups, [int]$MaxThreads)
     # ----------------------------------------------------------------
     # 4. RUNSPACE-POOL + SCRIPTBLOCK
     # ----------------------------------------------------------------
@@ -454,6 +461,13 @@ function Invoke-Main {
     $Pool.Close()
     $Pool.Dispose()
 
+    return [PSCustomObject]@{
+        Results = $Results
+        ErrCount = $ErrCount
+    }
+}
+function Export-Results {
+    param([System.Collections.Generic.List[PSObject]]$Results, [int]$ErrCount, [array]$SortedGroups)
     # ----------------------------------------------------------------
     # 5. EXPORT
     # ----------------------------------------------------------------
@@ -511,6 +525,31 @@ function Invoke-Main {
     Write-Host " Tab 2   : $Path2"
     Write-Host " Log     : $LogFile"
     Write-Host "====================================================" -ForegroundColor Cyan
+}
+function Invoke-Main {
+    Show-Header
+    Import-Module ActiveDirectory
+
+    if (-not $CsvPath) { $CsvPath = Read-Host "Pfad zur Master-CSV eingeben" }
+    $CsvPath = $CsvPath.Trim().Trim('"')
+    if (-not (Test-Path $CsvPath)) {
+        Write-Log "Master-CSV nicht gefunden: '$CsvPath'" "ERROR"
+        return
+    }
+
+    $RequiredList = Get-RequiredList -RequiredCsvPath $RequiredCsvPath
+    $MasterCsvData = Get-MasterCsvData -CsvPath $CsvPath
+
+    $DiscoveryRes = Invoke-ADDiscovery -MasterCsvData $MasterCsvData -SearchGlobal $SearchGlobal -TestCount $TestCount
+    $ADCache = $DiscoveryRes.ADCache
+    $SortedGroups = $DiscoveryRes.SortedGroups
+    $ProcessList = $DiscoveryRes.ProcessList
+
+    $JobRes = Invoke-ProcessingJobs -ProcessList $ProcessList -MasterCsvData $MasterCsvData -ADCache $ADCache -RequiredList $RequiredList -SortedGroups $SortedGroups -MaxThreads $MaxThreads
+    $Results = $JobRes.Results
+    $ErrCount = $JobRes.ErrCount
+
+    Export-Results -Results $Results -ErrCount $ErrCount -SortedGroups $SortedGroups
 }
 
 Invoke-Main
