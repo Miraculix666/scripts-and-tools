@@ -876,52 +876,41 @@ begin {
          return $newUser
      }
 
-    # Funktion zum Anwenden von Eigenschaften auf einen existierenden Benutzer
-    function Apply-ADUserProperties {
+    # Hilfsfunktion zum Synchronisieren der Attribute
+    function Sync-ADUserAttributes {
         [CmdletBinding(SupportsShouldProcess = $true)]
         param(
             [Parameter(Mandatory = $true)]
-            [Microsoft.ActiveDirectory.Management.ADUser]$ReferenceUser, # Quelle der Eigenschaften
+            [Microsoft.ActiveDirectory.Management.ADUser]$ReferenceUser,
 
             [Parameter(Mandatory = $true)]
-            [Microsoft.ActiveDirectory.Management.ADUser]$TargetUser # Ziel der Modifikation
+            [Microsoft.ActiveDirectory.Management.ADUser]$TargetUser
         )
 
-        Write-Log -Level Info -Message "Beginne Anwenden von Eigenschaften von '$($ReferenceUser.SamAccountName)' auf '$($TargetUser.SamAccountName)'."
-
-        # --- Eigenschaften definieren, die angewendet werden sollen ---
         $propertiesToApply = @(
             'Description', 'Office', 'StreetAddress', 'City', 'State',
             'PostalCode', 'Country', 'Department', 'Company', 'Title',
             'OfficePhone', 'EmailAddress'
-            # Fügen Sie hier weitere Attribute hinzu oder entfernen Sie welche
         )
 
-        # Hashtable für Set-ADUser vorbereiten
         $setParams = @{ Identity = $TargetUser }
         $changesDetected = $false
         $changedPropsList = @()
 
-        # Eigenschaften vergleichen und zur Hashtable hinzufügen, wenn unterschiedlich
         foreach ($prop in $propertiesToApply) {
             if ($ReferenceUser.$prop -ne $TargetUser.$prop) {
-                # Nur setzen, wenn der Wert im Referenzbenutzer nicht null oder leer ist
-                # (um zu vermeiden, dass existierende Werte im Ziel gelöscht werden, wenn sie in der Quelle fehlen)
-                 # Korrektur: Prüfen ob Property im Referenzobjekt existiert bevor Zugriff erfolgt
                  if ($ReferenceUser.PSObject.Properties.Match($prop).Count -gt 0 -and $ReferenceUser.$prop -ne $null -and $ReferenceUser.$prop -ne '') {
                     Write-Verbose "Änderung für '$($TargetUser.SamAccountName)' bei Eigenschaft '$prop': '$($TargetUser.$prop)' -> '$($ReferenceUser.$prop)'"
                     $setParams[$prop] = $ReferenceUser.$prop
                     $changesDetected = $true
-                    $changedPropsList += $prop # Geänderte Eigenschaften für Meldung sammeln
+                    $changedPropsList += $prop
                 } else {
                     Write-Verbose "Eigenschaft '$prop' ist im Referenzbenutzer '$($ReferenceUser.SamAccountName)' leer, null oder nicht vorhanden, wird für '$($TargetUser.SamAccountName)' nicht überschrieben."
                 }
             }
         }
 
-        # --- Eigenschaften anwenden ---
         if ($changesDetected) {
-            # Detailliertere ShouldProcess-Meldung
             $shouldProcessTarget = "Benutzer '$($TargetUser.SamAccountName)'"
             $shouldProcessAction = "Eigenschaften anwenden (Quelle: $($ReferenceUser.SamAccountName)): $($changedPropsList -join ', ')"
             if ($PSCmdlet.ShouldProcess($shouldProcessTarget, $shouldProcessAction)) {
@@ -933,7 +922,6 @@ begin {
                     $msg = "Fehler beim Anwenden der Eigenschaften auf '$($TargetUser.SamAccountName)': $_"
                     Write-Log -Level Error -Message $msg
                     Add-UserReportEntry -SamAccountName $TargetUser.SamAccountName -Status "Fehler" -Detail "Fehler beim Anwenden der Eigenschaften: $_"
-                    # Nicht unbedingt abbrechen, vielleicht klappt das Gruppensetzen noch
                 }
             } else {
                 Write-Log -Level Info -Message "Anwenden der Eigenschaften auf '$($TargetUser.SamAccountName)' übersprungen (ShouldProcess)."
@@ -941,11 +929,25 @@ begin {
             }
         } else {
             Write-Log -Level Info -Message "Keine unterschiedlichen Eigenschaften zum Anwenden auf '$($TargetUser.SamAccountName)' gefunden."
-            # Korrektur v6.5: Report-Eintrag nur wenn wirklich keine Änderung *geplant* war
-            # Add-UserReportEntry -SamAccountName $TargetUser.SamAccountName -Status "Keine Änderung" -Detail "Keine Eigenschaftsänderungen von $($ReferenceUser.SamAccountName) nötig"
         }
 
-        # --- Gruppenmitgliedschaften hinzufügen (nur fehlende) ---
+        return $changesDetected
+    }
+
+    # Hilfsfunktion zum Synchronisieren der Gruppenmitgliedschaften
+    function Sync-ADUserGroups {
+        [CmdletBinding(SupportsShouldProcess = $true)]
+        param(
+            [Parameter(Mandatory = $true)]
+            [Microsoft.ActiveDirectory.Management.ADUser]$ReferenceUser,
+
+            [Parameter(Mandatory = $true)]
+            [Microsoft.ActiveDirectory.Management.ADUser]$TargetUser,
+
+            [Parameter(Mandatory = $true)]
+            [bool]$AttributesChanged
+        )
+
         try {
             Write-Verbose "Prüfe Gruppenmitgliedschaften für '$($TargetUser.SamAccountName)' (Quelle: $($ReferenceUser.SamAccountName))."
             $referenceGroups = Get-ADPrincipalGroupMembership -Identity $ReferenceUser -ErrorAction Stop
@@ -953,7 +955,6 @@ begin {
 
             # Gruppen filtern (z.B. Domain Users ausschließen)
             $referenceGroupsFiltered = $referenceGroups | Where-Object {$_.Name -ne "Domain Users"}
-            # $targetGroupsFiltered = $targetGroups | Where-Object {$_.Name -ne "Domain Users"} # Target muss nicht gefiltert werden für Compare
 
             # Gruppen finden, die der Referenzbenutzer hat, der Zielbenutzer aber nicht
             $groupsToAdd = Compare-Object -ReferenceObject $referenceGroupsFiltered -DifferenceObject $targetGroups -Property DistinguishedName -PassThru | Where-Object {$_.SideIndicator -eq '<='}
@@ -961,7 +962,7 @@ begin {
             if ($groupsToAdd) {
                 $groupNames = $groupsToAdd.Name -join ', '
                 Write-Log -Level Info -Message "Füge $($groupsToAdd.Count) fehlende Gruppenmitgliedschaften zu '$($TargetUser.SamAccountName)' hinzu (Quelle: $($ReferenceUser.SamAccountName))."
-                # Detailliertere ShouldProcess-Meldung
+
                 $shouldProcessTarget = "Benutzer '$($TargetUser.SamAccountName)'"
                 $shouldProcessAction = "Hinzufügen zu Gruppen ($($groupsToAdd.Count)): $groupNames"
                 if ($PSCmdlet.ShouldProcess($shouldProcessTarget, $shouldProcessAction)) {
@@ -975,7 +976,7 @@ begin {
             } else {
                 Write-Log -Level Info -Message "Keine fehlenden Gruppenmitgliedschaften bei '$($TargetUser.SamAccountName)' gefunden (basierend auf $($ReferenceUser.SamAccountName))."
                  # Report-Eintrag nur, wenn auch bei Eigenschaften keine Änderung erfolgte
-                 if(-not $changesDetected) {
+                 if(-not $AttributesChanged) {
                     Add-UserReportEntry -SamAccountName $TargetUser.SamAccountName -Status "Keine Änderung" -Detail "Keine Eigenschafts- oder Gruppenänderungen von $($ReferenceUser.SamAccountName) nötig"
                  }
             }
@@ -984,6 +985,26 @@ begin {
              Write-Log -Level Warning -Message $msg
              Add-UserReportEntry -SamAccountName $TargetUser.SamAccountName -Status "Warnung" -Detail "Fehler beim Verarbeiten der Gruppen: $_"
         }
+    }
+
+    # Funktion zum Anwenden von Eigenschaften auf einen existierenden Benutzer
+    function Apply-ADUserProperties {
+        [CmdletBinding(SupportsShouldProcess = $true)]
+        param(
+            [Parameter(Mandatory = $true)]
+            [Microsoft.ActiveDirectory.Management.ADUser]$ReferenceUser, # Quelle der Eigenschaften
+
+            [Parameter(Mandatory = $true)]
+            [Microsoft.ActiveDirectory.Management.ADUser]$TargetUser # Ziel der Modifikation
+        )
+
+        Write-Log -Level Info -Message "Beginne Anwenden von Eigenschaften von '$($ReferenceUser.SamAccountName)' auf '$($TargetUser.SamAccountName)'."
+
+        # --- Eigenschaften anwenden ---
+        $attributesChanged = Sync-ADUserAttributes -ReferenceUser $ReferenceUser -TargetUser $TargetUser
+
+        # --- Gruppenmitgliedschaften hinzufügen ---
+        Sync-ADUserGroups -ReferenceUser $ReferenceUser -TargetUser $TargetUser -AttributesChanged $attributesChanged
 
         Write-Log -Level Info -Message "Anwenden von Eigenschaften/Gruppen auf '$($TargetUser.SamAccountName)' abgeschlossen."
 
