@@ -253,7 +253,7 @@ Write-Host "LastLogonDate update completed for expired users."
 $inputFilePath = "C:\Daten\Deaktivierte_L_Kennung_SAM.txt"
 
 # Set the new password
-$newPassword = ConvertTo-SecureString -String "P2f7aL4!01" -AsPlainText -Force
+$newPassword = Read-Host "Please enter the new password for the users" -AsSecureString
 
 # Read SamAccountNames from the file
 $samAccountNames = Get-Content -Path $inputFilePath
@@ -261,7 +261,7 @@ $samAccountNames = Get-Content -Path $inputFilePath
 # Reset password for each user
 foreach ($samAccountName in $samAccountNames) {
     try {
-        Set-ADAccountPassword -Identity $samAccountName -Reset -NewPassword (ConvertTo-SecureString -AsPlainText $newPassword -Force) -ErrorAction Stop
+        Set-ADAccountPassword -Identity $samAccountName -Reset -NewPassword $newPassword -ErrorAction Stop
         Write-Host "Password reset successful for user: $samAccountName" -ForegroundColor Green
     } catch {
         Write-Host "Failed to reset password for user: $samAccountName" -ForegroundColor Red
