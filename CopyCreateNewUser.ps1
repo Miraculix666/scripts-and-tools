@@ -24,18 +24,12 @@
 
 [CmdletBinding()]
 param (
-    [Parameter(Mandatory=$true)]
-param(
     [Parameter(Mandatory=$false)]
-[string]$CsvPath,
+    [string]$CsvPath,
 
-    [Parameter(Mandatory=$true)]
-    
     [Parameter(Mandatory=$false)]
-[string]$TemplateUser,
+    [string]$TemplateUser,
 
-    [switch]$ExportTemplateOnly
-    
     [Parameter(Mandatory=$false)]
     [switch]$ExportTemplateOnly,
     
@@ -56,9 +50,6 @@ function Create-LogDirectory {
 }
 
 # Funktion zum Schreiben von Log-Einträgen
-function Write-Log {
-    param (
-        [string]$Message
 # Funktionen für Logging und Ausgabe
 function Write-LogMessage {
     param(
@@ -91,42 +82,40 @@ $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 # Funktion zum Exportieren der Template-Daten
 function Export-TemplateUserData {
     param (
+        [Parameter(Mandatory=$true)]
         [string]$TemplateUser,
-        [string]$CsvPath
+
+        [Parameter(Mandatory=$false)]
+        [string]$CsvPath = ".\TemplateUser_Export.csv"
     )
-    $user = Get-ADUser -Identity $TemplateUser -Properties *
-    $userProperties = $user | Select-Object SamAccountName, GivenName, Surname, Name, DisplayName, Description, Office, Department, Title, Company, EmailAddress, StreetAddress, City, State, PostalCode, Country, OfficePhone
-    $userProperties | Export-Csv -Path $CsvPath -NoTypeInformation -Delimiter ";"
-    Write-Log "Vorlagenbenutzerdaten wurden in $CsvPath exportiert."
-    param([string]$TemplateUser)
     
     try {
         $user = Get-ADUser -Identity $TemplateUser -Properties *
         $exportProperties = @(
-            'GivenName','Surname','Department','Title',
-            'City','Country','Company','Office'
+            'SamAccountName', 'GivenName', 'Surname', 'Name', 'DisplayName',
+            'Description', 'Office', 'Department', 'Title', 'Company',
+            'EmailAddress', 'StreetAddress', 'City', 'State', 'PostalCode',
+            'Country', 'OfficePhone'
         )
         
         $userData = $user | Select-Object $exportProperties
-        $userData | Export-Csv -Path ".\TemplateUser_Export.csv" -NoTypeInformation -Encoding UTF8
-        Write-LogMessage "Template-Daten wurden exportiert nach TemplateUser_Export.csv" -Type Success
+        $userData | Export-Csv -Path $CsvPath -NoTypeInformation -Delimiter ";" -Encoding UTF8
+        Write-LogMessage "Template-Daten wurden exportiert nach $CsvPath" -Type Success
     }
     catch {
         Write-LogMessage "Fehler beim Exportieren der Template-Daten: $_" -Type Error
-        exit
+        throw $_
     }
 }
 
-# Funktion zum Erstellen eines neuen AD-Benutzers
-function New-ADUserFromTemplate {
-    param (
+
 # Hauptfunktion zur Benutzerverarbeitung
 function Process-UserCreation {
     param(
-[hashtable]$UserData,
-        [string]$TemplateUser
+        [hashtable]$UserData,
+        [string]$TemplateUser,
         [string]$TargetOU
-)
+    )
     $template = Get-ADUser -Identity $TemplateUser -Properties *
     
 $securePassword = ConvertTo-SecureString $UserData.Password -AsPlainText -Force
@@ -134,11 +123,10 @@ $securePassword = ConvertTo-SecureString $UserData.Password -AsPlainText -Force
     
 $newUserParams = @{
         SamAccountName = $UserData.SamAccountName
-        UserPrincipalName = "$($UserData.SamAccountName)@$((Get-ADDomain).DNSRoot)"
-        Name = $UserData.Name
+        UserPrincipalName = "$($UserData.SamAccountName)@$($env:USERDNSDOMAIN)"
         Name = "$($UserData.GivenName) $($UserData.Surname)"
-GivenName = $UserData.GivenName
-Surname = $UserData.Surname
+        GivenName = $UserData.GivenName
+        Surname = $UserData.Surname
         DisplayName = $UserData.DisplayName
         Description = $UserData.Description
         Office = $UserData.Office
@@ -152,13 +140,10 @@ Surname = $UserData.Surname
         PostalCode = $UserData.PostalCode
         Country = $UserData.Country
         OfficePhone = $UserData.OfficePhone
-        SamAccountName = $UserData.SamAccountName
-        UserPrincipalName = "$($UserData.SamAccountName)@$($env:USERDNSDOMAIN)"
-AccountPassword = $securePassword
-Enabled = $true
-        Path = ($template.DistinguishedName -split ',', 2)[1]
-        Instance = $template
+        AccountPassword = $securePassword
+        Enabled = $true
         Path = $TargetOU
+        Instance = $template
 }
 
     
@@ -171,18 +156,20 @@ Enabled = $true
     
 try {
 New-ADUser @newUserParams
-        Write-Log "Benutzer $($UserData.SamAccountName) wurde erfolgreich erstellt."
         Write-LogMessage "Benutzer $($UserData.SamAccountName) erfolgreich erstellt" -Type Success
 }
 catch {
-        Write-Log "Fehler beim Erstellen des Benutzers $($UserData.SamAccountName): $_"
         Write-LogMessage "Fehler beim Erstellen von $($UserData.SamAccountName): $_" -Type Error
 }
 }
 
-# Hauptlogik
-if ($ExportTemplateOnly) {
+if ($MyInvocation.InvocationName -ne '.') {
+    # Hauptlogik
+    if ($ExportTemplateOnly) {
     Export-TemplateUserData -TemplateUser $TemplateUser -CsvPath $CsvPath
+    exit
+}
+
 # Hauptprogramm
 Write-LogMessage "Starte AD-Benutzerverarbeitung" -Type Info
 
@@ -190,8 +177,7 @@ Write-LogMessage "Starte AD-Benutzerverarbeitung" -Type Info
 if (-not $TargetOU) {
     $TargetOU = Read-Host "Bitte geben Sie die Ziel-OU an (z.B. 'OU=Users,DC=domain,DC=com')"
 }
-else {
-    $users = Import-Csv -Path $CsvPath -Delimiter ";"
+
 if (-not (Get-ADOrganizationalUnit -Filter "DistinguishedName -eq '$TargetOU'")) {
     Write-LogMessage "Die angegebene OU existiert nicht: $TargetOU" -Type Error
     exit
@@ -208,14 +194,11 @@ if ($CsvPath) {
     # CSV-Modus
     $users = Import-Csv -Path $CsvPath -Encoding UTF8
 foreach ($user in $users) {
-        if ([string]::IsNullOrEmpty($user.Password)) {
-            Write-Log "Fehler: Passwort für Benutzer $($user.SamAccountName) fehlt. Dieser Benutzer wird übersprungen."
         if (-not $user.Password) {
             Write-LogMessage "Kein Passwort für Benutzer $($user.SamAccountName) angegeben" -Type Error
-continue
-}
-        New-ADUserFromTemplate -UserData $user -TemplateUser $TemplateUser
-        Process-UserCreation -UserData $user -TargetOU $TargetOU
+            continue
+        }
+        Process-UserCreation -UserData $user -TemplateUser $TemplateUser -TargetOU $TargetOU
     }
 }
 else {
@@ -236,5 +219,5 @@ else {
     Process-UserCreation -UserData $userData -TargetOU $TargetOU
 }
 
-Write-Log "Skript-Ausführung abgeschlossen."
 Write-LogMessage "Verarbeitung abgeschlossen" -Type Success
+}
