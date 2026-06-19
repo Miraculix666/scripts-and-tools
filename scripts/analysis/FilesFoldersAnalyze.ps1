@@ -291,7 +291,7 @@ function Get-DirectorySizeTree {
         [int]$Depth = 0
     )
     
-    $result = [pscustomobject]@{ Name = (Get-Item $Path).Name; Path = $Path; Depth = $Depth; Files = 0; Folders = 0; SizeOfFiles = 0; TotalSize = 0; Children = @() }
+    $result = [pscustomobject]@{ Name = (Get-Item $Path).Name; Path = $Path; Depth = $Depth; Files = 0; Folders = 0; SizeOfFiles = 0; TotalSize = 0; Children = [System.Collections.Generic.List[object]]::new() }
 
     try {
         $items = Get-ChildItem -Path $Path -Force -ErrorAction SilentlyContinue
@@ -322,7 +322,7 @@ function Get-DirectorySizeTree {
             $childResult = Get-DirectorySizeTree -Path $dir.FullName -ExcludePathsArray $ExcludePathsArray -Depth ($Depth + 1)
             if ($null -ne $childResult) {
                 $result.TotalSize += $childResult.TotalSize
-                $result.Children += $childResult
+                [void]$result.Children.Add($childResult)
             }
         }
     }
