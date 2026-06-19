@@ -146,62 +146,47 @@ function Write-CsvLine {
 }
 
 # ══════════════════════════════════════════════════════════════════
-#  MAIN
+#  LOGIC-FUNCTIONS
 # ══════════════════════════════════════════════════════════════════
-function Invoke-Main {
-    Show-Banner
-    Import-Module ActiveDirectory -Verbose:$false
 
-    Write-Log "PowerShell v$($PSVersionTable.PSVersion)  |  PID $PID  |  Host: $env:COMPUTERNAME" "DBG"
-    Write-Log "Logfile: $LogFile" "INFO"
-
-    # ──────────────────────────────────────────────────────────────
-    # INPUT
-    # ──────────────────────────────────────────────────────────────
-    if (-not $CsvPath) { $CsvPath = Read-Host "📂  Pfad zur Master-CSV" }
-    $CsvPath = $CsvPath.Trim().Trim('"')
-    if (-not (Test-Path $CsvPath)) {
-        Write-Log "Master-CSV nicht gefunden: '$CsvPath'" "ERR"; return
-    }
-    Write-Log "Master-CSV: $CsvPath" "DBG"
-
-    # ──────────────────────────────────────────────────────────────
-    # 1. BEDARFSLISTE
-    # ──────────────────────────────────────────────────────────────
+function Get-RequiredList {
+    param([string]$Path)
     Write-Section "📋  BEDARFSLISTE laden"
-    $RequiredList = New-Object 'System.Collections.Generic.HashSet[string]'
-    if ($RequiredCsvPath -and (Test-Path $RequiredCsvPath)) {
-        $lines = Get-Content $RequiredCsvPath -Encoding UTF8
+    $list = New-Object 'System.Collections.Generic.HashSet[string]'
+    if ($Path -and (Test-Path $Path)) {
+        $lines = Get-Content $Path -Encoding UTF8
         Write-Log "Rohdaten: $($lines.Count) Zeilen" "DBG"
         foreach ($line in $lines) {
             if ($line -match "(L\d{6,8})") {
-                [void]$RequiredList.Add($Matches[1].ToUpper())
+                [void]$list.Add($Matches[1].ToUpper())
             }
         }
-        Write-Log "Bedarfsliste: $($RequiredList.Count) L-Kennungen eingelesen" "OK"
+        Write-Log "Bedarfsliste: $($list.Count) L-Kennungen eingelesen" "OK"
     } else {
         Write-Log "Keine Bedarfsliste angegeben oder Datei fehlt -> übersprungen" "WARN"
     }
+    return $list
+}
 
-    # ──────────────────────────────────────────────────────────────
-    # 2. MASTER-CSV
-    # ──────────────────────────────────────────────────────────────
+function Get-MasterCsv {
+    param([string]$Path, [System.Diagnostics.Stopwatch]$SW)
     Write-Section "📊  MASTER-CSV laden"
     $t0 = $SW.Elapsed.TotalSeconds
-    $MasterCsvData = @{}
-    $rawCsv = Import-Csv -Path $CsvPath -Delimiter ';' -Encoding Default
+    $dict = @{}
+    $rawCsv = Import-Csv -Path $Path -Delimiter ';' -Encoding Default
     Write-Log "CSV eingelesen: $($rawCsv.Count) Rohdatensaetze" "DBG"
     foreach ($row in $rawCsv) {
         if ($row."L-Kennung") {
             $k = $row."L-Kennung".ToString().Trim().ToUpper()
-            if ($k) { $MasterCsvData[$k] = $row }
+            if ($k) { $dict[$k] = $row }
         }
     }
-    Write-Log "Master-CSV: $($MasterCsvData.Count) gueltige L-Kennungen  [+$([math]::Round($SW.Elapsed.TotalSeconds-$t0,2))s]" "OK"
+    Write-Log "Master-CSV: $($dict.Count) gueltige L-Kennungen  [+$([math]::Round($SW.Elapsed.TotalSeconds-$t0,2))s]" "OK"
+    return $dict
+}
 
-    # ──────────────────────────────────────────────────────────────
-    # 3. AD-DISCOVERY
-    # ──────────────────────────────────────────────────────────────
+function Get-ADDiscovery {
+    param([switch]$SearchGlobal, [System.Diagnostics.Stopwatch]$SW)
     Write-Section "🔎  AD-DISCOVERY"
     $t0           = $SW.Elapsed.TotalSeconds
     $ADCache      = @{}
@@ -256,20 +241,22 @@ function Invoke-Main {
     $SortedGroups = @($UniqueGroups | Sort-Object)
     Write-Log "AD-Discovery abgeschlossen: $($ADCache.Count) AD-Objekte  |  $($SortedGroups.Count) unique Gruppen  [+$([math]::Round($SW.Elapsed.TotalSeconds-$t0,2))s]" "PERF"
 
-    # Arbeitsliste aufbauen
-    $AllSAMs     = @(@($ADCache.Keys) + @($MasterCsvData.Keys) | Select-Object -Unique | Sort-Object)
-    Write-Log "Gesamt unique SAMs (AD + CSV): $($AllSAMs.Count)" "DBG"
+    return @{
+        Cache = $ADCache
+        Groups = $SortedGroups
+    }
+}
 
-    $ProcessList = if ($TestCount -gt 0) {
-        Write-Log "⚠️  TESTMODUS: nur erste $TestCount Eintraege" "WARN"
-        @($AllSAMs | Select-Object -First $TestCount)
-    } else { $AllSAMs }
-
-    Write-Log "Zu verarbeitende Eintraege: $($ProcessList.Count)" "OK"
-
-    # ──────────────────────────────────────────────────────────────
-    # 4. SEQUENZIELLE VERARBEITUNG
-    # ──────────────────────────────────────────────────────────────
+function Invoke-Processing {
+    param(
+        [array]$ProcessList,
+        [hashtable]$MasterCsvData,
+        [hashtable]$ADCache,
+        [System.Collections.Generic.HashSet[string]]$RequiredList,
+        [array]$SortedGroups,
+        [System.Diagnostics.Stopwatch]$SW,
+        [switch]$DebugMode
+    )
     Write-Section "⚙️   VERARBEITUNG  ($($ProcessList.Count) Eintraege · sequenziell)"
     $t0      = $SW.Elapsed.TotalSeconds
     $Results = New-Object 'System.Collections.Generic.List[PSObject]'
@@ -443,9 +430,17 @@ function Invoke-Main {
     $procTime = [math]::Round($SW.Elapsed.TotalSeconds - $t0, 2)
     Write-Log "Verarbeitung abgeschlossen: $($Results.Count) Datensaetze in ${procTime}s  (~$([math]::Round($procTime/$Total*1000,1))ms/Eintrag)" "PERF"
 
-    # ──────────────────────────────────────────────────────────────
-    # 5. EXPORT  (StreamWriter — O(1) RAM statt O(n*m))
-    # ──────────────────────────────────────────────────────────────
+    return $Results
+}
+
+function Export-Results {
+    param(
+        [System.Collections.Generic.List[PSObject]]$Results,
+        [array]$SortedGroups,
+        [System.Diagnostics.Stopwatch]$SW,
+        [string]$ScriptDir,
+        [string]$Version
+    )
     Write-Section "💾  EXPORT  ($($Results.Count) Zeilen · $($SortedGroups.Count) Gruppenspalten)"
 
     if ($Results.Count -eq 0) {
@@ -501,6 +496,55 @@ function Invoke-Main {
     } finally { $sw2.Close() }
     Write-Host ""
     Write-Log "Tab2 fertig: $Path2  [+$([math]::Round($SW.Elapsed.TotalSeconds-$t0,2))s]" "OK"
+
+    return @{ Path1 = $Path1; Path2 = $Path2 }
+}
+
+
+# ══════════════════════════════════════════════════════════════════
+#  MAIN
+# ══════════════════════════════════════════════════════════════════
+function Invoke-Main {
+    Show-Banner
+    Import-Module ActiveDirectory -Verbose:$false
+
+    Write-Log "PowerShell v$($PSVersionTable.PSVersion)  |  PID $PID  |  Host: $env:COMPUTERNAME" "DBG"
+    Write-Log "Logfile: $LogFile" "INFO"
+
+    # ──────────────────────────────────────────────────────────────
+    # INPUT
+    # ──────────────────────────────────────────────────────────────
+    if (-not $CsvPath) { $CsvPath = Read-Host "📂  Pfad zur Master-CSV" }
+    $CsvPath = $CsvPath.Trim().Trim('"')
+    if (-not (Test-Path $CsvPath)) {
+        Write-Log "Master-CSV nicht gefunden: '$CsvPath'" "ERR"; return
+    }
+    Write-Log "Master-CSV: $CsvPath" "DBG"
+
+    $RequiredList = Get-RequiredList -Path $RequiredCsvPath
+
+    $MasterCsvData = Get-MasterCsv -Path $CsvPath -SW $SW
+
+    $ADResult = Get-ADDiscovery -SearchGlobal:$SearchGlobal -SW $SW
+    $ADCache = $ADResult.Cache
+    $SortedGroups = $ADResult.Groups
+
+    # Arbeitsliste aufbauen
+    $AllSAMs     = @(@($ADCache.Keys) + @($MasterCsvData.Keys) | Select-Object -Unique | Sort-Object)
+    Write-Log "Gesamt unique SAMs (AD + CSV): $($AllSAMs.Count)" "DBG"
+
+    $ProcessList = if ($TestCount -gt 0) {
+        Write-Log "⚠️  TESTMODUS: nur erste $TestCount Eintraege" "WARN"
+        @($AllSAMs | Select-Object -First $TestCount)
+    } else { $AllSAMs }
+
+    Write-Log "Zu verarbeitende Eintraege: $($ProcessList.Count)" "OK"
+
+    $Results = Invoke-Processing -ProcessList $ProcessList -MasterCsvData $MasterCsvData -ADCache $ADCache -RequiredList $RequiredList -SortedGroups $SortedGroups -SW $SW -DebugMode:$DebugMode
+
+    $ExportPaths = Export-Results -Results $Results -SortedGroups $SortedGroups -SW $SW -ScriptDir $ScriptDir -Version $Version
+    $Path1 = $ExportPaths.Path1
+    $Path2 = $ExportPaths.Path2
 
     # ──────────────────────────────────────────────────────────────
     # ABSCHLUSS
