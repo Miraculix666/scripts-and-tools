@@ -194,13 +194,8 @@ function Export-ToExcel {
     }
 }
 
-function Export-ToHtml {
-    param (
-        [Parameter(Mandatory)][object[]]$Data,
-        [Parameter(Mandatory)][string]$Path
-    )
-    
-    $html = @"
+function Get-HtmlTemplate {
+    return @"
 <!DOCTYPE html>
 <html>
 <head>
@@ -218,13 +213,22 @@ function Export-ToHtml {
     <h1>AD User Groups Visualization</h1>
     <div id="visualization"></div>
     <script>
-        const data = {
+__JS_CONTENT__
+    </script>
+</body>
+</html>
+"@
+}
+
+function Get-VisualizationScript {
+    return @'
+const data = {
             nodes: [],
             links: []
         };
         
         // Process data for visualization
-        const users = $($Data | ConvertTo-Json);
+        const users = DATA_PLACEHOLDER;
         const processedUsers = new Set();
         const processedGroups = new Set();
         
@@ -301,7 +305,7 @@ function Export-ToHtml {
                 .attr("y2", d => d.target.y);
             
             node
-                .attr("transform", d => `translate(\${d.x},\${d.y})`);
+                .attr("transform", d => `translate(${d.x},${d.y})`);
         });
         
         function dragstarted(event, d) {
@@ -320,10 +324,22 @@ function Export-ToHtml {
             d.fx = null;
             d.fy = null;
         }
-    </script>
-</body>
-</html>
-"@
+'@
+}
+
+function Export-ToHtml {
+    param (
+        [Parameter(Mandatory)][object[]]$Data,
+        [Parameter(Mandatory)][string]$Path
+    )
+
+    $jsonData = $($Data | ConvertTo-Json)
+
+    $jsScript = Get-VisualizationScript
+    $jsScript = $jsScript.Replace('DATA_PLACEHOLDER', $jsonData)
+
+    $htmlTemplate = Get-HtmlTemplate
+    $html = $htmlTemplate.Replace('__JS_CONTENT__', $jsScript)
     
     $html | Out-File -FilePath $Path -Encoding UTF8
     Write-Host "HTML visualization exported: $Path" -ForegroundColor Green
