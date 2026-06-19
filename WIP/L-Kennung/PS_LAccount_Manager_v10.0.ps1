@@ -396,53 +396,53 @@ $CalcScriptBlock = {
 # ══════════════════════════════════════════════════════════════════
 #  MAIN
 # ══════════════════════════════════════════════════════════════════
-function Invoke-Main {
-    Show-Banner
-    Import-Module ActiveDirectory -Verbose:$false
 
-    Write-Log ("PS v{0}  PID={1}  Host={2}  Threads={3}  GroupMode={4}" -f `
-        $PSVersionTable.PSVersion, $PID, $env:COMPUTERNAME, $MaxThreads, $GroupMode) "DBG"
-
-    if (-not $CsvPath) {
-        $CsvPath = (Read-Host "Pfad zur Master-CSV").Trim().Trim('"')
-    }
-    $CsvPath = $CsvPath.Trim().Trim('"')
-    if (-not (Test-Path $CsvPath)) { Write-Log "CSV nicht gefunden: $CsvPath" "ERR"; return }
-
-    # ── 1. BEDARFSLISTE ──────────────────────────────────────────
+function Get-RequiredList {
+    param([string]$Path)
     Write-Section "BEDARFSLISTE"
-    $RequiredList = New-Object 'System.Collections.Generic.HashSet[string]'
-    if ($RequiredCsvPath -and (Test-Path $RequiredCsvPath)) {
-        foreach ($line in (Get-Content $RequiredCsvPath -Encoding UTF8)) {
+    $list = New-Object 'System.Collections.Generic.HashSet[string]'
+    if ($Path -and (Test-Path $Path)) {
+        foreach ($line in (Get-Content $Path -Encoding UTF8)) {
             if ($line -match "(L\d{6,8})") {
                 $v = $Matches[1].ToUpper()
-                [void]$RequiredList.Add($v)
+                [void]$list.Add($v)
             }
         }
-        Write-Log "Bedarfsliste: $($RequiredList.Count) Eintraege" "OK"
+        Write-Log "Bedarfsliste: $($list.Count) Eintraege" "OK"
     } else {
         Write-Log "Keine Bedarfsliste angegeben -> uebersprungen" "WARN"
     }
+    return $list
+}
 
-    # ── 2. MASTER-CSV ────────────────────────────────────────────
+function Get-MasterCsvData {
+    param([string]$Path, $Stopwatch)
     Write-Section "MASTER-CSV laden"
-    $t0 = $SW.Elapsed.TotalSeconds
-    $MasterCsvData = @{}
-    foreach ($row in (Import-Csv -Path $CsvPath -Delimiter ';' -Encoding Default)) {
+    $t0 = $Stopwatch.Elapsed.TotalSeconds
+    $data = @{}
+    foreach ($row in (Import-Csv -Path $Path -Delimiter ';' -Encoding Default)) {
         if ($row."L-Kennung") {
             $k = $row."L-Kennung".ToString().Trim().ToUpper()
-            if ($k) { $MasterCsvData[$k] = $row }
+            if ($k) { $data[$k] = $row }
         }
     }
-    Write-Log ("Master-CSV: {0} Zeilen  [{1:F2}s]" -f $MasterCsvData.Count, ($SW.Elapsed.TotalSeconds-$t0)) "OK"
+    Write-Log ("Master-CSV: {0} Zeilen  [{1:F2}s]" -f $data.Count, ($Stopwatch.Elapsed.TotalSeconds-$t0)) "OK"
+    return $data
+}
 
-    # ── 3. AD-DISCOVERY (Subtree OU=81 und OU=82) ────────────────
+function Get-ADDiscoveryData {
+    param(
+        [string]$OUFilter,
+        [string]$GroupFilter,
+        $Stopwatch,
+        $AD_PROPS
+    )
     Write-Section "AD-DISCOVERY  (Subtree 81+82, alle Sub-OUs)"
-    $t0           = $SW.Elapsed.TotalSeconds
+    $t0           = $Stopwatch.Elapsed.TotalSeconds
     $ADCache      = @{}
     $UniqueGroups = New-Object 'System.Collections.Generic.HashSet[string]'
+    $grpFilterCount = 0
 
-    # Beide Ziel-OUs suchen (81 UND 82), SearchScope Subtree erfasst alle Sub-OUs
     $TargetOUs = @(Get-ADOrganizationalUnit `
         -Filter "Name -eq '81' -or Name -eq '82'" `
         -ErrorAction SilentlyContinue)
@@ -454,9 +454,8 @@ function Invoke-Main {
 
     foreach ($ou in $TargetOUs) {
         Write-Log "Scanne OU (Subtree): $($ou.DistinguishedName)" "DBG"
-        $t1 = $SW.Elapsed.TotalSeconds
+        $t1 = $Stopwatch.Elapsed.TotalSeconds
 
-        # SearchScope Subtree -> erfasst ALLE Sub-OUs, auch unbekannte
         $users = Get-ADUser `
             -Filter * `
             -SearchBase  $ou.DistinguishedName `
@@ -465,14 +464,12 @@ function Invoke-Main {
 
         $userArr  = @($users)
         $rawCount = $userArr.Count
-        Write-Log ("OU {0}: {1} User gefunden  [{2:F2}s]" -f $ou.Name, $rawCount, ($SW.Elapsed.TotalSeconds-$t1)) "DBG"
+        Write-Log ("OU {0}: {1} User gefunden  [{2:F2}s]" -f $ou.Name, $rawCount, ($Stopwatch.Elapsed.TotalSeconds-$t1)) "DBG"
 
         foreach ($u in $userArr) {
             $sam = $u.SamAccountName.ToUpper()
             $dn  = $u.DistinguishedName
 
-            # OUFilter: wenn gesetzt, nur User aus passenden OUs einlesen
-            # -> reduziert ADCache und spart Verarbeitungszeit
             if ($OUFilter -ne "") {
                 if ($dn -notlike "*$OUFilter*") {
                     Write-Log "OUFilter: $sam uebersprungen ($dn)" "DBG"
@@ -493,32 +490,43 @@ function Invoke-Main {
 
     $SortedGroups = @($UniqueGroups | Sort-Object)
     Write-Log ("Discovery: {0} AD-Objekte  |  {1} unique Gruppen  [{2:F2}s]" -f `
-        $ADCache.Count, $SortedGroups.Count, ($SW.Elapsed.TotalSeconds-$t0)) "PERF"
+        $ADCache.Count, $SortedGroups.Count, ($Stopwatch.Elapsed.TotalSeconds-$t0)) "PERF"
 
     if ($GroupFilter -ne "") {
         $grpFilterCount = @($SortedGroups | Where-Object { $_ -like "*$GroupFilter*" }).Count
         Write-Log ("GroupFilter='$GroupFilter': $grpFilterCount Gruppen treffen zu -> Spalte FILTER_$GroupFilter") "INFO"
     }
 
-    # ── 4. ARBEITSLISTE AUFBAUEN + FILTER ────────────────────────
-    Write-Section "FILTER & ARBEITSLISTE"
-    $t0 = $SW.Elapsed.TotalSeconds
+    return @{
+        ADCache = $ADCache
+        SortedGroups = $SortedGroups
+        GrpFilterCount = $grpFilterCount
+    }
+}
 
-    # Alle SAMs aus AD-Cache UND Master-CSV zusammenfuehren
+function Get-ProcessList {
+    param(
+        $ADCache,
+        $MasterCsvData,
+        [switch]$LafpOnly,
+        [string]$NameFilter,
+        [int]$TestCount,
+        $Stopwatch
+    )
+    Write-Section "FILTER & ARBEITSLISTE"
+    $t0 = $Stopwatch.Elapsed.TotalSeconds
+
     $AllSAMs = @(@($ADCache.Keys) + @($MasterCsvData.Keys) | Select-Object -Unique | Sort-Object)
     Write-Log "Gesamt unique SAMs (AD+CSV): $($AllSAMs.Count)" "DBG"
 
-    # Filter anwenden (BEVOR parallele Verarbeitung -> spart Laufzeit)
     $ProcessList = $AllSAMs
 
-    # Filter 1: LafpOnly -> nur L110* und L114*
     if ($LafpOnly) {
         $before = $ProcessList.Count
         $ProcessList = @($ProcessList | Where-Object { $_ -like "L110*" -or $_ -like "L114*" })
         Write-Log ("LafpOnly: {0} -> {1} SAMs  (-{2})" -f $before, $ProcessList.Count, ($before-$ProcessList.Count)) "WARN"
     }
 
-    # Filter 2: NameFilter -> SAMAccountName-Wildcard
     if ($NameFilter -ne "") {
         $before = $ProcessList.Count
         $ProcessList = @($ProcessList | Where-Object { $_ -like $NameFilter })
@@ -526,21 +534,33 @@ function Invoke-Main {
             $NameFilter, $before, $ProcessList.Count, ($before-$ProcessList.Count)) "WARN"
     }
 
-    # Filter 3: TestCount
     if ($TestCount -gt 0) {
         Write-Log "TESTMODUS: erste $TestCount Eintraege" "WARN"
         $ProcessList = @($ProcessList | Select-Object -First $TestCount)
     }
 
-    Write-Log ("Zu verarbeitende SAMs: {0}  [{1:F2}s]" -f $ProcessList.Count, ($SW.Elapsed.TotalSeconds-$t0)) "OK"
+    Write-Log ("Zu verarbeitende SAMs: {0}  [{1:F2}s]" -f $ProcessList.Count, ($Stopwatch.Elapsed.TotalSeconds-$t0)) "OK"
 
-    if ($ProcessList.Count -eq 0) {
-        Write-Log "Keine SAMs nach Filterung -> Abbruch" "ERR"; return
-    }
+    return $ProcessList
+}
 
-    # ── 5. PARALLELE VERARBEITUNG (immer aktiv) ──────────────────
+function Invoke-ParallelProcessing {
+    param(
+        $ProcessList,
+        $MasterCsvData,
+        $ADCache,
+        $RequiredList,
+        $SortedGroups,
+        [int]$MaxThreads,
+        [string]$GroupMode,
+        [string]$GroupFilter,
+        [scriptblock]$CalcScriptBlock,
+        [switch]$DebugMode,
+        $Stopwatch,
+        $LogFile
+    )
     Write-Section "VERARBEITUNG  ($($ProcessList.Count) Eintraege  |  $MaxThreads Threads)"
-    $t0 = $SW.Elapsed.TotalSeconds
+    $t0 = $Stopwatch.Elapsed.TotalSeconds
 
     $Pool = [runspacefactory]::CreateRunspacePool(
         1,
@@ -550,7 +570,6 @@ function Invoke-Main {
     $Pool.Open()
     Write-Log "Runspace-Pool geoeffnet ($MaxThreads Threads)" "DBG"
 
-    # Alle Jobs aufbauen
     $Jobs = New-Object 'System.Collections.Generic.List[PSObject]'
     foreach ($LID in $ProcessList) {
         $psi = [powershell]::Create()
@@ -571,7 +590,6 @@ function Invoke-Main {
     }
     Write-Log "$($Jobs.Count) Jobs gestartet" "DBG"
 
-    # Ergebnisse einsammeln
     $Results  = New-Object 'System.Collections.Generic.List[PSObject]'
     $done     = 0
     $errCount = 0
@@ -584,13 +602,11 @@ function Invoke-Main {
         foreach ($job in $finished) {
             $done++
 
-            # Fehler-Stream loggen
             foreach ($e in $job.Instance.Streams.Error) {
                 $errCount++
                 Write-Log "Runspace $($job.SAM): $e" "ERR"
             }
 
-            # Ergebnis einsammeln (PSDataCollection-sicher)
             $raw = $job.Instance.EndInvoke($job.AsyncResult)
             foreach ($item in $raw) {
                 if ($null -ne $item -and $null -ne $item.PSObject) {
@@ -612,9 +628,8 @@ function Invoke-Main {
         }
         foreach ($j in $toRemove) { [void]$Jobs.Remove($j) }
 
-        # Progress alle 50 oder am Ende
         if ($done % 50 -eq 0 -or $Jobs.Count -eq 0) {
-            $elapsed = $SW.Elapsed.TotalSeconds
+            $elapsed = $Stopwatch.Elapsed.TotalSeconds
             $rem     = if ($done -gt 0) { [math]::Round(($elapsed/$done)*($Total-$done)) } else { 0 }
             $pct     = [math]::Round(($done/$Total)*100)
             $fill    = [math]::Round(30*$pct/100)
@@ -634,7 +649,7 @@ function Invoke-Main {
     Write-Progress -Activity "Parallel-Verarbeitung" -Completed
     $Pool.Close(); $Pool.Dispose()
 
-    $procSec    = [math]::Round($SW.Elapsed.TotalSeconds - $t0, 2)
+    $procSec    = [math]::Round($Stopwatch.Elapsed.TotalSeconds - $t0, 2)
     $msPerEntry = if ($Results.Count -gt 0) { [math]::Round($procSec/$Results.Count*1000,1) } else { 0 }
 
     if ($errCount -gt 0) {
@@ -643,33 +658,41 @@ function Invoke-Main {
     Write-Log ("Verarbeitung: {0} Eintraege  {1}s  ({2}ms/Eintrag)  {3} Fehler" -f `
         $Results.Count, $procSec, $msPerEntry, $errCount) "PERF"
 
-    # ── 6. EXPORT ────────────────────────────────────────────────
-    Write-Section "EXPORT"
-    if ($Results.Count -eq 0) { Write-Log "Keine Ergebnisse -> Abbruch" "ERR"; return }
+    return @{
+        Results  = $Results
+        ErrCount = $errCount
+    }
+}
 
-    # Alle verfuegbaren Spalten aus erstem Ergebnis-Objekt holen
+function Export-ProcessingResults {
+    param(
+        $Results,
+        $SortedGroups,
+        [string]$GroupFilter,
+        [string]$GroupMode,
+        [string]$ScriptDir,
+        [string]$Version
+    )
+    Write-Section "EXPORT"
+    if ($Results.Count -eq 0) { Write-Log "Keine Ergebnisse -> Abbruch" "ERR"; return $null }
+
     $allResultCols = @($Results[0].psobject.Properties.Name)
 
-    # Tabelle 1: Gruppen-Uebersicht (kompakt)
-    # Basis + OU + GroupFilter-Marker + Gruppen-Spalten
     $cols1Base = @("L-Kennung","OU","GELOESCHT","Benoetigt","Geaendert","LOESCHEN","AD_Vorname","AD_Nachname")
 
-    # GroupFilter-Markerspalte hinzufuegen wenn gesetzt
     $filterColName = ""
     if ($GroupFilter -ne "") {
         $filterColName = "FILTER_$GroupFilter"
         $cols1Base += $filterColName
     }
 
-    # Gruppen-Spalten (ohne GRP_-Prefix, korrekte Spaltennamen)
     if ($GroupMode -eq "Single") {
         $cols1 = $cols1Base + @("Gruppen")
     } else {
-        $grpCols = @($SortedGroups)   # kein GRP_-Prefix mehr
+        $grpCols = @($SortedGroups)
         $cols1   = $cols1Base + $grpCols
     }
 
-    # Tabelle 2: Alle Properties (fuer Apply-Script) ohne LOESCHEN
     $cols2 = @($allResultCols | Where-Object { $_ -ne "LOESCHEN" })
 
     Write-Log ("Tab1: {0} Spalten  |  Tab2: {1} Spalten" -f $cols1.Count, $cols2.Count) "DBG"
@@ -683,12 +706,30 @@ function Invoke-Main {
     Export-FastCsv -Path $Path1 -ColNames $cols1 -Data $Results -Label "Tab1 Gruppen-Uebersicht"
     Export-FastCsv -Path $Path2 -ColNames $cols2 -Data $Results -Label "Tab2 Properties (Apply-Eingabe)"
 
-    # ── ABSCHLUSS ────────────────────────────────────────────────
-    $SW.Stop()
-    $dur = $SW.Elapsed.ToString('mm\:ss\.ff')
+    return @{ Path1 = $Path1; Path2 = $Path2 }
+}
+
+function Show-Summary {
+    param(
+        [int]$ResultsCount,
+        [int]$SortedGroupsCount,
+        [string]$GroupMode,
+        [string]$GroupFilter,
+        [int]$GrpFilterCount,
+        [string]$OUFilter,
+        [string]$NameFilter,
+        [switch]$LafpOnly,
+        [int]$ErrCount,
+        $ExportPaths,
+        [string]$LogFile,
+        $Stopwatch
+    )
+
+    $Stopwatch.Stop()
+    $dur = $Stopwatch.Elapsed.ToString('mm\:ss\.ff')
     $mb  = [math]::Round([System.GC]::GetTotalMemory($false) / 1MB, 1)
 
-    $grpFilterInfo = if ($GroupFilter -ne "") { "$($grpFilterCount)x  -> Spalte FILTER_$GroupFilter" } else { "kein" }
+    $grpFilterInfo = if ($GroupFilter -ne "") { "$($GrpFilterCount)x  -> Spalte FILTER_$GroupFilter" } else { "kein" }
     $filterInfo    = @()
     if ($OUFilter  -ne "") { $filterInfo += "OU=$OUFilter"   }
     if ($NameFilter -ne "") { $filterInfo += "Name=$NameFilter" }
@@ -698,22 +739,66 @@ function Invoke-Main {
     Write-Host ""
     Write-Host "  +----------------------------------------------------------+" -ForegroundColor Green
     Write-Host "  |  ABGESCHLOSSEN                                           |" -ForegroundColor Green
-    Write-Host ("  |  Datensaetze : {0,-43}|" -f $Results.Count)                 -ForegroundColor Green
-    Write-Host ("  |  Gruppen     : {0,-43}|" -f "$($SortedGroups.Count)  (Mode: $GroupMode)") -ForegroundColor Green
+    Write-Host ("  |  Datensaetze : {0,-43}|" -f $ResultsCount)                 -ForegroundColor Green
+    Write-Host ("  |  Gruppen     : {0,-43}|" -f "$SortedGroupsCount  (Mode: $GroupMode)") -ForegroundColor Green
     Write-Host ("  |  GrpFilter   : {0,-43}|" -f $grpFilterInfo)                 -ForegroundColor Green
     Write-Host ("  |  Filter      : {0,-43}|" -f $filterSummary)                 -ForegroundColor Green
-    Write-Host ("  |  Fehler      : {0,-43}|" -f $errCount)                      -ForegroundColor $(if($errCount -gt 0){"Red"}else{"Green"})
+    Write-Host ("  |  Fehler      : {0,-43}|" -f $ErrCount)                      -ForegroundColor $(if($ErrCount -gt 0){"Red"}else{"Green"})
     Write-Host ("  |  Dauer       : {0,-43}|" -f $dur)                           -ForegroundColor Green
     Write-Host ("  |  RAM         : {0,-43}|" -f "${mb} MB")                     -ForegroundColor Green
     Write-Host "  |                                                          |" -ForegroundColor DarkGreen
-    Write-Host ("  |  Tab1 : {0,-50}|" -f (Split-Path $Path1 -Leaf))             -ForegroundColor DarkGreen
-    Write-Host ("  |  Tab2 : {0,-50}|" -f (Split-Path $Path2 -Leaf))             -ForegroundColor DarkGreen
+    Write-Host ("  |  Tab1 : {0,-50}|" -f (Split-Path $ExportPaths.Path1 -Leaf)) -ForegroundColor DarkGreen
+    Write-Host ("  |  Tab2 : {0,-50}|" -f (Split-Path $ExportPaths.Path2 -Leaf)) -ForegroundColor DarkGreen
     Write-Host ("  |  Log  : {0,-50}|" -f (Split-Path $LogFile -Leaf))           -ForegroundColor DarkGreen
     Write-Host "  +----------------------------------------------------------+" -ForegroundColor Green
     Write-Host ""
 
     Write-Log ("Fertig. Dauer={0}  RAM={1}MB  Zeilen={2}  Gruppen={3}  Fehler={4}" -f `
-        $dur, $mb, $Results.Count, $SortedGroups.Count, $errCount) "PERF"
+        $dur, $mb, $ResultsCount, $SortedGroupsCount, $ErrCount) "PERF"
+}
+
+function Invoke-Main {
+    Show-Banner
+    Import-Module ActiveDirectory -Verbose:$false
+
+    Write-Log ("PS v{0}  PID={1}  Host={2}  Threads={3}  GroupMode={4}" -f `
+        $PSVersionTable.PSVersion, $PID, $env:COMPUTERNAME, $MaxThreads, $GroupMode) "DBG"
+
+    if (-not $CsvPath) {
+        $CsvPath = (Read-Host "Pfad zur Master-CSV").Trim().Trim('"')
+    }
+    $CsvPath = $CsvPath.Trim().Trim('"')
+    if (-not (Test-Path $CsvPath)) { Write-Log "CSV nicht gefunden: $CsvPath" "ERR"; return }
+
+    # ── 1. BEDARFSLISTE ──────────────────────────────────────────
+    $RequiredList = Get-RequiredList -Path $RequiredCsvPath
+
+    # ── 2. MASTER-CSV ────────────────────────────────────────────
+    $MasterCsvData = Get-MasterCsvData -Path $CsvPath -Stopwatch $SW
+
+    # ── 3. AD-DISCOVERY ──────────────────────────────────────────
+    $adData = Get-ADDiscoveryData -OUFilter $OUFilter -GroupFilter $GroupFilter -Stopwatch $SW -AD_PROPS $AD_PROPS
+    $ADCache = $adData.ADCache
+    $SortedGroups = $adData.SortedGroups
+    $grpFilterCount = $adData.GrpFilterCount
+
+    # ── 4. ARBEITSLISTE AUFBAUEN + FILTER ────────────────────────
+    $ProcessList = Get-ProcessList -ADCache $ADCache -MasterCsvData $MasterCsvData -LafpOnly:$LafpOnly -NameFilter $NameFilter -TestCount $TestCount -Stopwatch $SW
+    if ($ProcessList.Count -eq 0) {
+        Write-Log "Keine SAMs nach Filterung -> Abbruch" "ERR"; return
+    }
+
+    # ── 5. PARALLELE VERARBEITUNG ────────────────────────────────
+    $parallelData = Invoke-ParallelProcessing -ProcessList $ProcessList -MasterCsvData $MasterCsvData -ADCache $ADCache -RequiredList $RequiredList -SortedGroups $SortedGroups -MaxThreads $MaxThreads -GroupMode $GroupMode -GroupFilter $GroupFilter -CalcScriptBlock $CalcScriptBlock -DebugMode:$DebugMode -Stopwatch $SW -LogFile $LogFile
+    $Results = $parallelData.Results
+    $errCount = $parallelData.ErrCount
+
+    # ── 6. EXPORT ────────────────────────────────────────────────
+    $exportPaths = Export-ProcessingResults -Results $Results -SortedGroups $SortedGroups -GroupFilter $GroupFilter -GroupMode $GroupMode -ScriptDir $ScriptDir -Version $Version
+    if ($null -eq $exportPaths) { return }
+
+    # ── ABSCHLUSS ────────────────────────────────────────────────
+    Show-Summary -ResultsCount $Results.Count -SortedGroupsCount $SortedGroups.Count -GroupMode $GroupMode -GroupFilter $GroupFilter -GrpFilterCount $grpFilterCount -OUFilter $OUFilter -NameFilter $NameFilter -LafpOnly:$LafpOnly -ErrCount $errCount -ExportPaths $exportPaths -LogFile $LogFile -Stopwatch $SW
 }
 
 Invoke-Main
